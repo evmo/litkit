@@ -1,0 +1,5 @@
+# Python environment and bytecode (recreate with `uv sync`)
+.venv/
+__pycache__/
+*.pyc
+dist/

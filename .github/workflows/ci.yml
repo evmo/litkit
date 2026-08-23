@@ -1,0 +1,56 @@
+# The three repositories that depend on litkit lock it by git ref, so a break
+# here reaches them the moment one of them bumps. Every supported interpreter
+# runs the suite; the build job proves the packaged wheel still carries
+# common.mk, which is the one file a consumer gets at by path.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      # The extras are what the archive and S3 paths need; the core is
+      # stdlib-only and the suite covers it either way.
+      - run: uv sync --all-extras --python ${{ matrix.python }}
+      - run: uv run --python ${{ matrix.python }} python -m unittest discover -s tests -v
+      - run: uv run --python ${{ matrix.python }} python -m compileall -q litkit
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uvx ruff check litkit tests
+      - run: uv lock --check
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+      - name: the wheel must carry common.mk and py.typed
+        run: |
+          python -m zipfile -l dist/*.whl | grep -q 'litkit/data/common.mk'
+          python -m zipfile -l dist/*.whl | grep -q 'litkit/py.typed'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
