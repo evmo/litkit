@@ -8,6 +8,15 @@ tolerated are now refused, and two commands exit differently.
 
 ### Fixed
 
+- **Public HTTPS reads had no retries at all.** One connection reset or 5xx
+  aborted the pull, and because staged files are deleted with the temporary
+  directory, every verified byte already downloaded went with it — on a flaky
+  link a large `make sync` could never finish. The read path now gets three
+  attempts with a jittered backoff, for the connection-level failures only:
+  a 404, a 403 or an oversized body still fails on the first answer. The write
+  path was already retried ten times by botocore; this is the other half of
+  that.
+
 - **A failed parallel download still ran the whole queue.** `download_many`
   raised on the first failure, but left its pool without `cancel_futures`, so
   every queued job executed before the caller saw the error. With the network

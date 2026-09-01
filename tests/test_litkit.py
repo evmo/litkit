@@ -12,6 +12,7 @@ leaves the previous local copy alone.
 from __future__ import annotations
 
 import dataclasses
+import http.client
 import os
 import shutil
 import tempfile
@@ -22,6 +23,7 @@ import urllib.error
 from pathlib import Path
 
 from litkit import cli, config, creds, kinds, paths
+from litkit import remote as transport
 from litkit.hashing import file_sha256, tree_hash
 from litkit.manifest import Malformed, Manifest
 from litkit.remote import Conflict, Missing, Oversized, Remote, _url
@@ -1001,6 +1003,26 @@ class TestState(Base):
 
 # --- transport --------------------------------------------------------------
 
+class Response:
+    """Enough of an HTTP response for `_drain` and `get_bytes`."""
+
+    def __init__(self, body: bytes, headers: dict | None = None):
+        self._body, self.headers = body, headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            out, self._body = self._body, b""
+            return out
+        out, self._body = self._body[:n], self._body[n:]
+        return out
+
+
 class TestRemote(Base):
     def served(self):
         """A `file://` base, so the public read path runs with no server."""
@@ -1045,6 +1067,80 @@ class TestRemote(Base):
         with self.assertRaises(urllib.error.URLError):
             remote.download_many(jobs, workers=1)
         self.assertLess(len(started), 10, started)
+
+    def test_a_dropped_connection_is_retried(self):
+        # The write path has ten botocore attempts; the read path most people
+        # exercise used to have none, and one blip discarded a whole pull.
+        _, remote = self.served()
+        calls = []
+
+        def flaky(req, timeout=None):
+            calls.append(req.full_url)
+            if len(calls) == 1:
+                raise urllib.error.URLError(ConnectionResetError("reset"))
+            return Response(b"hello")
+
+        with unittest.mock.patch.object(transport.urllib.request, "urlopen",
+                                        flaky), \
+                unittest.mock.patch.object(transport, "BACKOFF", 0):
+            remote.download("a.csv", self.root / "out/a.csv")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((self.root / "out/a.csv").read_bytes(), b"hello")
+
+    def test_a_retry_does_not_append_to_the_previous_attempt(self):
+        _, remote = self.served()
+        calls = []
+
+        def truncating(req, timeout=None):
+            calls.append(req.full_url)
+            if len(calls) == 1:
+                return Response(b"half")     # closed before the body finished
+            return Response(b"the whole thing")
+
+        real_drain = transport._drain
+
+        def drain(reader, fh, max_bytes):
+            n = real_drain(reader, fh, max_bytes)
+            if n < len(b"the whole thing"):
+                raise http.client.IncompleteRead(b"")
+            return n
+
+        with unittest.mock.patch.object(transport.urllib.request, "urlopen",
+                                        truncating), \
+                unittest.mock.patch.object(transport, "_drain", drain), \
+                unittest.mock.patch.object(transport, "BACKOFF", 0):
+            remote.download("a.csv", self.root / "out/a.csv")
+        self.assertEqual((self.root / "out/a.csv").read_bytes(),
+                         b"the whole thing")
+
+    def test_a_missing_object_is_not_retried(self):
+        _, remote = self.served()
+        calls = []
+
+        def gone(req, timeout=None):
+            calls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {},
+                                         None)
+
+        with unittest.mock.patch.object(transport.urllib.request, "urlopen",
+                                        gone):
+            with self.assertRaises(Missing):
+                remote.get_bytes("manifest.json")
+        self.assertEqual(len(calls), 1)
+
+    def test_an_oversized_body_is_not_retried(self):
+        _, remote = self.served()
+        calls = []
+
+        def big(req, timeout=None):
+            calls.append(req.full_url)
+            return Response(b"x" * 100)
+
+        with unittest.mock.patch.object(transport.urllib.request, "urlopen",
+                                        big):
+            with self.assertRaises(Oversized):
+                remote.download("a.csv", self.root / "out/a.csv", 10)
+        self.assertEqual(len(calls), 1)
 
     def test_a_body_longer_than_promised_is_refused(self):
         d, remote = self.served()

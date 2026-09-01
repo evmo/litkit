@@ -16,7 +16,12 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import contextlib
+import http.client
 import os
+import random
+import socket
+import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,6 +33,17 @@ from .hashing import human
 UA = "litkit/0.1 (+https://github.com/evmo/litkit)"
 TIMEOUT = 120
 CHUNK = 1 << 20
+
+# Reads get a few attempts; writes get none here, because botocore already
+# retries those ten times over — R2 closes long multipart connections, and
+# creds.client is configured for it. The read path is the one most people
+# exercise, and a single blip on it used to cost a whole multi-gigabyte pull:
+# staged files live in a temporary directory and nothing is installed until
+# every file verifies, so a re-run starts from zero. Three attempts is enough
+# for one dropped connection and short enough that a network which is
+# genuinely gone still fails promptly.
+ATTEMPTS = 3
+BACKOFF = 0.5
 
 
 def _request(url: str, headers: dict[str, str] | None = None):
@@ -48,6 +64,45 @@ def _drain(reader, fh, max_bytes: int | None) -> int:
             raise Oversized(f"longer than the {max_bytes:,} bytes promised")
         fh.write(chunk)
     return total
+
+
+def _why(e: BaseException) -> str:
+    return f"{type(e).__name__}: {getattr(e, 'reason', None) or e}"
+
+
+def _transient(e: BaseException) -> bool:
+    """Is this worth another attempt — the connection, or the answer?
+
+    A 404 or a 403 will say the same thing next time, and an oversized body
+    is not going to shrink. A reset socket, a truncated read, a name that
+    would not resolve or a 5xx might all be gone by the next request.
+    """
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code in (408, 425, 429, 500, 502, 503, 504)
+    if isinstance(e, urllib.error.URLError) and isinstance(e.reason, BaseException):
+        e = e.reason
+    return isinstance(e, (ConnectionError, TimeoutError, socket.gaierror,
+                          ssl.SSLError, http.client.IncompleteRead))
+
+
+def _retrying(attempt, what: str):
+    """Run `attempt`, retrying a transient failure with a jittered backoff.
+
+    Every read this wraps is safe to repeat: each attempt writes to a fresh
+    `.part` file or an in-memory buffer, and what comes back is checked
+    against the manifest's size and digest afterwards. A second attempt can
+    only cost time.
+    """
+    for n in range(1, ATTEMPTS + 1):
+        try:
+            return attempt()
+        except Exception as e:
+            if n == ATTEMPTS or not _transient(e):
+                raise
+            pause = BACKOFF * 2 ** (n - 1) * (0.5 + random.random())
+            print(f"    {what}: {_why(e)} — retrying in {pause:.1f}s "
+                  f"({n} of {ATTEMPTS - 1})", flush=True)
+            time.sleep(pause)
 
 
 class Missing(Exception):
@@ -85,13 +140,15 @@ class Remote:
                   ) -> tuple[bytes, str | None]:
         """(body, etag). The etag is the precondition for writing it back."""
         if self.public:
-            try:
+            def once():
                 with urllib.request.urlopen(_request(_url(self.cfg.base, key)),
                                             timeout=TIMEOUT) as r:
                     body = r.read(limit + 1) if limit is not None else r.read()
                     if limit is not None and len(body) > limit:
                         raise Oversized(f"{key} is larger than {limit:,} bytes")
                     return body, (r.headers.get("ETag") or "").strip('"') or None
+            try:
+                return _retrying(once, key)
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     raise Missing(key) from None
@@ -119,12 +176,17 @@ class Remote:
         """
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".part")
+        def once():
+            with urllib.request.urlopen(_request(_url(self.cfg.base, key)),
+                                        timeout=TIMEOUT) as r, \
+                    tmp.open("wb") as fh:
+                _drain(r, fh, max_bytes)
+
         try:
             if self.public:
-                with urllib.request.urlopen(_request(_url(self.cfg.base, key)),
-                                            timeout=TIMEOUT) as r, \
-                        tmp.open("wb") as fh:
-                    _drain(r, fh, max_bytes)
+                # Each attempt reopens `tmp` for writing, so a retry starts
+                # from an empty file rather than appending to half of one.
+                _retrying(once, key)
             else:
                 self._s3.download_file(self._bucket, key, str(tmp))
             os.replace(tmp, dest)
@@ -235,13 +297,17 @@ def fetch_url(url: str, dest: Path) -> dict[str, str]:
     """Download an arbitrary URL, returning its validators."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
-    try:
+
+    def once():
         with urllib.request.urlopen(_request(url), timeout=TIMEOUT) as r, \
                 tmp.open("wb") as fh:
             _drain(r, fh, None)
             h = r.headers
-            meta = {"etag": (h.get("ETag") or "").strip('"'),
+            return {"etag": (h.get("ETag") or "").strip('"'),
                     "last_modified": h.get("Last-Modified") or ""}
+
+    try:
+        meta = _retrying(once, url)
         os.replace(tmp, dest)
     except BaseException:
         with contextlib.suppress(OSError):
