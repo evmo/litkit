@@ -15,6 +15,7 @@ import dataclasses
 import os
 import shutil
 import tempfile
+import time
 import unittest
 import unittest.mock
 import urllib.error
@@ -1024,6 +1025,26 @@ class TestRemote(Base):
         with self.assertRaises(urllib.error.URLError):
             remote.download("nope.csv", self.root / "out/a.csv")
         self.assertEqual(list((self.root / "out").iterdir()), [])
+
+    def test_a_failed_download_cancels_the_queue(self):
+        # The first failure decides the pull. Everything still queued behind
+        # it would otherwise run anyway — at a socket timeout each, once the
+        # network is what failed.
+        _, remote = self.served()
+        started = []
+
+        def counting(key, dest, max_bytes=None):
+            started.append(key)
+            if key == "boom.csv":
+                raise urllib.error.URLError("gone")
+            time.sleep(0.02)
+
+        remote.download = counting
+        jobs = [("boom.csv", self.root / "out/boom.csv")]
+        jobs += [(f"{i}.csv", self.root / f"out/{i}.csv") for i in range(40)]
+        with self.assertRaises(urllib.error.URLError):
+            remote.download_many(jobs, workers=1)
+        self.assertLess(len(started), 10, started)
 
     def test_a_body_longer_than_promised_is_refused(self):
         d, remote = self.served()

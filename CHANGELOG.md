@@ -8,6 +8,13 @@ tolerated are now refused, and two commands exit differently.
 
 ### Fixed
 
+- **A failed parallel download still ran the whole queue.** `download_many`
+  raised on the first failure, but left its pool without `cancel_futures`, so
+  every queued job executed before the caller saw the error. With the network
+  down that is a socket timeout each — hours, for a large mirror, spent on a
+  pull that had already failed. Queued jobs are cancelled; only the in-flight
+  ones finish.
+
 - **A push could publish a digest the bucket does not have.** Both kinds
   hashed before they uploaded and never looked again, so an artifact rewritten
   in between — `make build` still running under `make publish` — was described

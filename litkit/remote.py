@@ -140,11 +140,20 @@ class Remote:
     def download_many(self, jobs: list[tuple], workers: int = 8,
                       label: str = "") -> None:
         """(key, dest[, max_bytes]) triples, concurrently. Raises on the first
-        failure."""
+        failure, and drops whatever has not started.
+
+        `with ThreadPoolExecutor` would shut down without `cancel_futures`, so
+        every queued job still ran to completion before the exception the
+        caller is waiting for surfaced. On a network that has gone away each
+        of those spends the full socket timeout, which turns a thousand-file
+        pull into hours of waiting for an error that was already decided. The
+        in-flight ones still have to finish; the rest are cancelled.
+        """
         if not jobs:
             return
         done = 0
-        with cf.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        pool = cf.ThreadPoolExecutor(max_workers=max(1, workers))
+        try:
             futures = {pool.submit(self.download, *j): j for j in jobs}
             for fut in cf.as_completed(futures):
                 key, dest = futures[fut][0], futures[fut][1]
@@ -152,6 +161,8 @@ class Remote:
                 done += 1
                 print(f"    [{done}/{len(jobs)}] {human(dest.stat().st_size):>10}"
                       f"  {key}", flush=True)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
     # --- writes -------------------------------------------------------------
 
