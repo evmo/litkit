@@ -304,6 +304,21 @@ def archive_push(ctx, art, *, force=False, dry_run=False) -> bool:
     with _staging(ctx.cfg) as tmp:
         bundle = Path(tmp) / f"{art.name}.tar.zst"
         _pack(ctx.cfg.root, src, bundle)
+        # `tree_hash` and `_pack` read the tree independently, and packing a
+        # large one takes a while — long enough for a build still running
+        # underneath the publish to put different bytes in each. The manifest
+        # would then record a digest the bundle does not have, and every
+        # reader's pull would fail on it until someone happened to push
+        # again. Re-read before anything is uploaded.
+        again, _, _ = tree_hash(src)
+        if again != digest:
+            raise SystemExit(
+                f"  {art.name}: {art.path} changed while it was being "
+                f"packed — nothing was uploaded\n"
+                f"    was {digest}\n"
+                f"    now {again}\n"
+                f"    wait for whatever is writing it to finish, then "
+                f"re-run `litkit push`")
         packed = bundle.stat().st_size
         if dry_run:
             print(f"  {art.name:9} would upload {human(packed)} -> {art.key}")
@@ -363,6 +378,19 @@ def _local_index(ctx, art) -> tuple[dict[str, dict], int]:
         idx[rel] = {"path": rel, "size": size, "sha256": file_sha256(p)}
         total += size
     return idx, total
+
+
+def _unchanged(path: Path, e: dict) -> bool:
+    """Is the file still the bytes `_local_index` hashed into `e`?
+
+    Size first, because it settles nearly every real case without re-reading
+    a large file.
+    """
+    try:
+        return (path.stat().st_size == e["size"]
+                and file_sha256(path) == e["sha256"])
+    except OSError:
+        return False
 
 
 def _classify(local: dict, remote: list[dict]) -> tuple[list, list, list]:
@@ -513,17 +541,40 @@ def mirror_push(ctx, art, *, force=False, dry_run=False) -> bool:
         return False
 
     uploaded: set[str] = set()
+    raced: list[str] = []
     try:
         for i, e in enumerate(todo, 1):
             full = ctx.cfg.root / e["path"]
             ctype = mimetypes.guess_type(str(full))[0] or "application/octet-stream"
             ctx.remote.upload(full, e["path"], ctype)
+            # The digest was taken before the upload started, so a file
+            # rewritten in between would be published under a digest the
+            # object does not have — and every reader would then fail to
+            # verify it. Re-reading the file is the only way to know that
+            # the bytes which went up are the bytes being described.
+            if not _unchanged(full, e):
+                raced.append(e["path"])
+                print(f"    [{i}/{len(todo)}] {'changed':>12}  {e['path']}"
+                      f"  — rewritten mid-upload", flush=True)
+                continue
             uploaded.add(e["path"])
             print(f"    [{i}/{len(todo)}] {e['size']:>12,}  {e['path']}", flush=True)
     finally:
         # Even an interrupted push leaves the manifest describing the objects
-        # that did land; `cli.cmd_push` commits it on the way out.
+        # that did land; `cli.cmd_push` commits it on the way out. A file that
+        # raced is left out of `uploaded`, so it keeps the digest the bucket
+        # had before — or, if it is new, is not listed at all. Either way the
+        # next push sees it as changed and re-uploads it.
         ctx.manifest.set(art.name, _mirror_entry(art, local, known, uploaded))
+    if raced:
+        raise SystemExit(
+            f"  {art.name}: {len(raced)} file(s) were rewritten while they "
+            f"were uploading, so the bucket now holds bytes this push cannot "
+            f"describe:\n" +
+            "\n".join(f"    {p}" for p in raced[:10]) +
+            (f"\n    … and {len(raced) - 10:,} more" if len(raced) > 10 else "") +
+            f"\n    They are not published. Wait for whatever is writing "
+            f"{art.path} to finish, then re-run `litkit push`.")
     # Even with nothing uploaded the file list may have shrunk, so the manifest
     # is rewritten whenever it no longer matches what is on disk.
     return bool(todo) or bool(gone)

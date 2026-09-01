@@ -8,6 +8,15 @@ tolerated are now refused, and two commands exit differently.
 
 ### Fixed
 
+- **A push could publish a digest the bucket does not have.** Both kinds
+  hashed before they uploaded and never looked again, so an artifact rewritten
+  in between — `make build` still running under `make publish` — was described
+  by a manifest that no longer matched what went up. Push exited 0 and every
+  reader's `pull` failed verification until someone happened to push again.
+  An archive re-hashes its tree after packing and uploads nothing if it moved;
+  a mirror re-reads each file after its upload and leaves out the ones that
+  did, then exits non-zero naming them.
+
 - **A failed `pull --clean` deleted local-only files anyway.** The sweep of
   files the bucket does not have ran *before* the download, so a pull that then
   failed verification had already unlinked the only copy of each — artifact

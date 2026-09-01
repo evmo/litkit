@@ -651,6 +651,31 @@ class TestMirror(Base):
         self.assertEqual(listed, in_bucket)
         self.assertNotEqual(listed, on_disk)        # one upload did not happen
 
+    def test_a_file_rewritten_while_it_uploads_is_not_published(self):
+        # The digest is taken before the upload; a file that moves in between
+        # would otherwise be listed under a digest the object does not have.
+        self.write("out/a.csv", "one")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+
+        real_upload = remote.upload
+
+        def racing_upload(src, key, content_type):
+            real_upload(src, key, content_type)
+            self.write("out/a.csv", "one, rewritten mid-upload")
+
+        remote.upload = racing_upload
+        with self.assertRaises(SystemExit) as e:
+            kinds.mirror_push(ctx, self.art())
+        self.assertIn("rewritten while they were uploading", str(e.exception))
+        self.assertEqual(man.mirror_files("out"), [])
+
+        # …and the next push, with nothing moving underneath it, publishes it.
+        remote.upload = real_upload
+        self.assertTrue(kinds.mirror_push(ctx, self.art()))
+        self.assertEqual(man.mirror_files("out")[0]["sha256"],
+                         file_sha256(self.root / "out/a.csv"))
+
     def test_status_reports_missing_stale_and_extra(self):
         self.write("out/a.csv", "hello")
         remote, man = Fake(), Manifest({})
@@ -823,6 +848,28 @@ class TestArchive(Base):
 
         self.assertTrue((self.root / "data/cache").is_symlink())
         self.assertEqual({p.name for p in outside.iterdir()}, {"1.json"})
+
+    def test_a_tree_rewritten_while_it_packs_is_not_published(self):
+        # tree_hash and _pack read the tree separately, so a build still
+        # running under a publish can put different bytes in each — and the
+        # manifest would record a digest the uploaded bundle does not have.
+        for i in range(3):
+            self.write(f"data/cache/{i}.json", f'{{"n": {i}}}')
+        remote, man = Fake(), Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+
+        real_pack = kinds._pack
+
+        def racing_pack(root, src, dest):
+            self.write("data/cache/3.json", "{}")     # the build is still going
+            real_pack(root, src, dest)
+
+        with unittest.mock.patch.object(kinds, "_pack", racing_pack):
+            with self.assertRaises(SystemExit) as e:
+                kinds.archive_push(ctx, self.art())
+        self.assertIn("changed while it was being packed", str(e.exception))
+        self.assertEqual(remote.objects, {})
+        self.assertIsNone(man.get("cache"))
 
     def test_status_absent_both_sides(self):
         ctx = Ctx(self.cfg, Fake(), Manifest({}))
