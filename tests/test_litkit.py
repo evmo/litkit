@@ -674,6 +674,24 @@ class TestMirror(Base):
         kinds.mirror_pull(ctx, self.art(), clean=True)
         self.assertFalse((self.root / "out/extra.csv").exists())
 
+    def test_a_failed_clean_pull_deletes_no_local_extras(self):
+        # --clean removes the only copy there is: artifact directories are
+        # git-ignored and the file is by definition not in the bucket. So it
+        # has to wait for the download to verify.
+        self.write("out/a.csv", "hello")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        self.write("out/extra.csv", "irreplaceable")
+        remote.objects["out/a.csv"] = b"tampered"
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.mirror_pull(ctx, self.art(), force=True, clean=True)
+        self.assertIn("nothing under out was changed", str(e.exception))
+        self.assertEqual((self.root / "out/extra.csv").read_text(),
+                         "irreplaceable")
+        self.assertEqual((self.root / "out/a.csv").read_text(), "hello")
+
 
 # --- the archive kind -------------------------------------------------------
 

@@ -408,12 +408,24 @@ def mirror_pull(ctx, art, *, force=False, clean=False, workers=8) -> None:
     missing, stale, extra = _classify(local, remote)
     want = remote if force else missing + stale
 
-    if clean and extra:
+    def sweep() -> None:
+        """Remove the local files the bucket does not have.
+
+        The only irreversible thing a pull does, and artifact directories are
+        git-ignored, so the copy being removed is routinely the only one.
+        That is why it happens *after* the download has verified and never
+        before: a pull that fails deletes nothing, which is what the module
+        docstring promises and what the archive kind already does by sweeping
+        inside `_install`.
+        """
         for rel in extra:
             print(f"  {art.name:9} removing local extra {rel}")
-            (ctx.cfg.root / rel).unlink()
+            with contextlib.suppress(FileNotFoundError):
+                (ctx.cfg.root / rel).unlink()
 
     if not want:
+        if clean:
+            sweep()
         print(f"  {art.name:9} up to date  ({len(local):,} files)")
         return
     print(f"  {art.name:9} downloading {len(want):,} of {len(remote):,} files"
@@ -442,6 +454,8 @@ def mirror_pull(ctx, art, *, force=False, clean=False, workers=8) -> None:
                 (f"\n    … and {len(bad) - 10:,} more" if len(bad) > 10 else ""))
 
         # Verified: from here the working tree may be changed.
+        if clean:
+            sweep()
         for _e, staged, dest in moves:
             dest.parent.mkdir(parents=True, exist_ok=True)
             _move(staged, dest)

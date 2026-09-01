@@ -8,6 +8,14 @@ tolerated are now refused, and two commands exit differently.
 
 ### Fixed
 
+- **A failed `pull --clean` deleted local-only files anyway.** The sweep of
+  files the bucket does not have ran *before* the download, so a pull that then
+  failed verification had already unlinked the only copy of each — artifact
+  directories are git-ignored, and a file absent from the bucket has no other
+  copy — while the error it printed said nothing under the artifact had been
+  changed. The sweep now runs after verification, where the `archive` kind
+  already had it.
+
 - **Manifest paths could escape the checkout.** Entries were joined to the
   repository root and written, so `../../…` in a manifest — or a symlinked
   parent directory — could put a download outside the repo, or delete
