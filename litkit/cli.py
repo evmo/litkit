@@ -23,6 +23,12 @@ from pathlib import Path
 from . import config, kinds
 from .manifest import Manifest
 
+# `doctor` exists for the machine whose toolchain is broken, which is also the
+# machine where `quarto --version` can stall — a first run initialising its
+# cache against an unreachable home directory, a wedged mount, a wrapper
+# script waiting on something. It has to come back and say so.
+QUARTO_TIMEOUT = 10
+
 
 class Ctx:
     """Config, transport and manifest — the last two built only if used.
@@ -221,8 +227,14 @@ def cmd_doctor(args) -> int:
         check("common.mk", False, "missing — `litkit mk > common.mk`")
 
     if q:
-        v = subprocess.run([q, "--version"], capture_output=True, text=True)
-        print(f"\n  quarto {v.stdout.strip()}")
+        try:
+            v = subprocess.run([q, "--version"], capture_output=True,
+                               text=True, timeout=QUARTO_TIMEOUT)
+            print(f"\n  quarto {v.stdout.strip()}")
+        except subprocess.TimeoutExpired:
+            print(f"\n  FAIL  quarto {q} did not answer `--version` within "
+                  f"{QUARTO_TIMEOUT}s — wedged, not missing")
+            ok = False
     return 0 if ok else 1
 
 

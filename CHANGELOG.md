@@ -8,6 +8,11 @@ tolerated are now refused, and two commands exit differently.
 
 ### Fixed
 
+- **`doctor` could hang forever on `quarto --version`.** The subprocess had
+  no timeout, so the command whose job is diagnosing a broken toolchain hung
+  on exactly the machine it exists for. It waits ten seconds, then says quarto
+  is wedged rather than missing, and fails.
+
 - **A push could report its own success as someone else's.** If the
   connection dropped after R2 applied the manifest write but before the answer
   arrived, botocore's retry carried the same `If-Match` and was refused by the

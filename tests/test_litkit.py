@@ -11,8 +11,10 @@ leaves the previous local copy alone.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import http.client
+import io
 import os
 import shutil
 import tempfile
@@ -1298,6 +1300,21 @@ class TestCli(Base):
             return cli.main(argv), remote
         finally:
             cli.config.load, cli.Ctx = original
+
+    def test_doctor_comes_back_from_a_quarto_that_never_answers(self):
+        # The one command whose whole job is diagnosing a broken toolchain,
+        # on exactly the machine it exists for.
+        def hangs(cmd, **kw):
+            raise cli.subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+        out = io.StringIO()
+        with unittest.mock.patch.object(cli.shutil, "which",
+                                        lambda name: f"/usr/bin/{name}"), \
+                unittest.mock.patch.object(cli.subprocess, "run", hangs), \
+                contextlib.redirect_stdout(out):
+            rc, _ = self.run_cli(["doctor"])
+        self.assertIn("did not answer", out.getvalue())
+        self.assertEqual(rc, 1)
 
     def test_workers_must_be_at_least_one(self):
         with self.assertRaises(SystemExit) as e:
