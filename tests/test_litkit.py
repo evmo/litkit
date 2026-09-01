@@ -1150,6 +1150,61 @@ class TestRemote(Base):
         self.assertEqual(list((self.root / "out").iterdir()), [])
 
 
+class StubS3:
+    """A conditional write that is always refused, and the read-back after."""
+
+    def __init__(self, stored: bytes | None, readable: bool = True):
+        self.stored, self.readable, self.puts = stored, readable, 0
+
+    def put_object(self, **kw):
+        import botocore.exceptions
+        self.puts += 1
+        raise botocore.exceptions.ClientError(
+            {"Error": {"Code": "PreconditionFailed"},
+             "ResponseMetadata": {"HTTPStatusCode": 412}}, "PutObject")
+
+    def get_object(self, Bucket, Key):
+        if not self.readable:
+            raise OSError("the connection is still down")
+        return {"Body": Response(self.stored), "ETag": '"e"'}
+
+
+class TestConditionalWrite(Base):
+    """The real `put_bytes`. The fake bucket answers conflicts itself, so the
+    412 handling has never been exercised through it."""
+
+    BODY = b'{"artifacts": {}}'
+
+    def remote(self, stub):
+        with unittest.mock.patch.object(
+                transport._creds, "load",
+                lambda root, bucket: {"R2_BUCKET_NAME": "b"}), \
+                unittest.mock.patch.object(transport._creds, "client",
+                                           lambda c: stub):
+            return Remote(self.cfg, need_write=True)
+
+    def test_a_412_over_our_own_bytes_is_not_a_conflict(self):
+        # The write landed and the response was lost; botocore's retry then
+        # tripped over the first attempt's own object. Nobody else published.
+        stub = StubS3(self.BODY)
+        self.remote(stub).put_bytes("m.json", self.BODY, "application/json",
+                                    if_match="v1")
+        self.assertEqual(stub.puts, 1)
+
+    def test_a_412_over_someone_elses_bytes_is_still_a_conflict(self):
+        stub = StubS3(b'{"artifacts": {"theirs": {}}}')
+        with self.assertRaises(Conflict) as e:
+            self.remote(stub).put_bytes("m.json", self.BODY,
+                                        "application/json", if_match="v1")
+        self.assertIn("someone else published", str(e.exception))
+
+    def test_an_unreadable_manifest_after_a_412_is_still_a_conflict(self):
+        stub = StubS3(None, readable=False)
+        with self.assertRaises(Conflict):
+            self.remote(stub).put_bytes("m.json", self.BODY,
+                                        "application/json", if_absent=True)
+
+
 # --- end to end, through the real transport ---------------------------------
 
 class TestRoundTripOverHttpLikeReads(Base):

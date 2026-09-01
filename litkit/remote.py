@@ -261,6 +261,18 @@ class Remote:
             status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
             if code in ("PreconditionFailed", "ConditionalRequestConflict") \
                     or status in (412, 409):
+                # botocore retries a put whose connection died on the way
+                # back — creds.client asks for ten attempts, because R2 drops
+                # long ones — and the retry carries the same precondition, so
+                # it can be refused by the first attempt's own write. Read the
+                # object back before telling a maintainer someone else
+                # published: a two-person workflow acts on that sentence.
+                with contextlib.suppress(Exception):
+                    if self.get_bytes(key)[0] == body:
+                        print(f"  {key} is already what this push wrote — "
+                              f"the answer to the write was lost, not the "
+                              f"write")
+                        return
                 raise Conflict(
                     f"  {key} changed in {self.where} while this push was "
                     f"running — someone else published.\n"

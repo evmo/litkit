@@ -8,6 +8,14 @@ tolerated are now refused, and two commands exit differently.
 
 ### Fixed
 
+- **A push could report its own success as someone else's.** If the
+  connection dropped after R2 applied the manifest write but before the answer
+  arrived, botocore's retry carried the same `If-Match` and was refused by the
+  first attempt's own object — and the 412 became "someone else published",
+  which in a two-maintainer repo is a sentence people act on. The manifest is
+  read back before that is said; if it is what this run sent, the push
+  succeeded.
+
 - **Public HTTPS reads had no retries at all.** One connection reset or 5xx
   aborted the pull, and because staged files are deleted with the temporary
   directory, every verified byte already downloaded went with it — on a flaky
