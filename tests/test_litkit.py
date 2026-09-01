@@ -12,13 +12,15 @@ leaves the previous local copy alone.
 from __future__ import annotations
 
 import dataclasses
+import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 import urllib.error
 from pathlib import Path
 
-from litkit import cli, config, kinds, paths
+from litkit import cli, config, creds, kinds, paths
 from litkit.hashing import file_sha256, tree_hash
 from litkit.manifest import Malformed, Manifest
 from litkit.remote import Conflict, Missing, Oversized, Remote, _url
@@ -241,6 +243,70 @@ class TestPaths(Base):
         art = {a.name: a for a in self.cfg.artifacts}["out"]
         with self.assertRaises(paths.Unsafe):
             paths.under_artifact(self.root, art, "out/sub/elsewhere.csv")
+
+
+# --- credentials on disk ----------------------------------------------------
+
+class TestCreds(Base):
+    """`.r2` is a live write credential; the mode it sits at is part of it."""
+
+    FULL = ("R2_ACCOUNT_ID=acct\nR2_ACCESS_KEY_ID=akid\n"
+            "R2_SECRET_ACCESS_KEY=" + "b" * 64 + "\nR2_BUCKET_NAME=buck\n")
+
+    def setUp(self):
+        super().setUp()
+        # The environment wins over the file, so a stray R2_* in the shell
+        # running the tests would otherwise decide their outcome. patch.dict
+        # puts back whatever was there when each test ends.
+        self.enterContext(unittest.mock.patch.dict(os.environ, clear=False))
+        for k in (*creds.KEYS, "R2_BUCKET"):
+            os.environ.pop(k, None)
+
+    def creds_file(self, text: str, mode: int) -> Path:
+        p = self.root / creds.CREDS_NAME
+        p.write_text(text)
+        p.chmod(mode)
+        return p
+
+    def test_loads_a_private_file(self):
+        self.creds_file(self.FULL, 0o600)
+        self.assertEqual(creds.load(self.root)["R2_BUCKET_NAME"], "buck")
+
+    def test_refuses_a_world_readable_secret(self):
+        self.creds_file(self.FULL, 0o644)
+        with self.assertRaises(SystemExit) as e:
+            creds.load(self.root)
+        self.assertIn("chmod 600", str(e.exception))
+
+    def test_refuses_a_group_readable_secret(self):
+        self.creds_file(self.FULL, 0o640)
+        with self.assertRaises(SystemExit):
+            creds.load(self.root)
+
+    def test_refuses_a_group_writable_secret(self):
+        """Not just readable: another user substituting the key is worse."""
+        self.creds_file(self.FULL, 0o620)
+        with self.assertRaises(SystemExit):
+            creds.load(self.root)
+
+    def test_a_blank_template_is_not_a_secret(self):
+        """`.r2` naming the bucket while CI supplies the key is legitimate."""
+        self.creds_file(creds.EXAMPLE + "R2_BUCKET_NAME=buck\n", 0o644)
+        os.environ.update(R2_ACCOUNT_ID="acct", R2_ACCESS_KEY_ID="akid",
+                          R2_SECRET_ACCESS_KEY="c" * 64)
+        self.assertEqual(creds.load(self.root)["R2_BUCKET_NAME"], "buck")
+
+    def test_an_env_supplied_key_does_not_excuse_the_file(self):
+        """The exposure is the bytes on disk, not which copy litkit used."""
+        self.creds_file(self.FULL, 0o644)
+        os.environ["R2_SECRET_ACCESS_KEY"] = "d" * 64
+        with self.assertRaises(SystemExit):
+            creds.load(self.root)
+
+    def test_no_file_at_all_still_reports_what_is_missing(self):
+        with self.assertRaises(SystemExit) as e:
+            creds.load(self.root)
+        self.assertIn("missing R2 credentials", str(e.exception))
 
 
 # --- identity ---------------------------------------------------------------

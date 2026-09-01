@@ -133,7 +133,9 @@ litkit doctor              check toolchain, config, credentials
 
 Credentials come from `.r2` at the repository root (git-ignored) or from the
 environment, which wins — a laptop supplies them without an export, CI without
-a file.
+a file. If `.r2` holds a secret and other users on the machine can read it,
+loading is refused rather than warned about: it is a live write credential for
+a bucket readers trust, so `chmod 600 .r2`.
 
 ## License
 
