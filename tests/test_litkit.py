@@ -1740,6 +1740,18 @@ class TestFetch(Base):
             setattr(kinds, name, fn)
             self.addCleanup(setattr, kinds, name, original)
 
+    def test_an_oversized_fetch_is_reported_not_a_traceback(self):
+        def refuses(url, dest):
+            raise Oversized("larger than the 10 bytes a fetch is held to")
+
+        kinds.fetch_url = refuses
+        self.write("data/positions.csv", "mine\n")
+        with self.assertRaises(SystemExit) as e:
+            kinds.fetch_pull(self.ctx, self.art)
+        self.assertIn("was not touched", str(e.exception))
+        self.assertIn("a fetch is held to", str(e.exception))
+        self.assertEqual((self.root / "data/positions.csv").read_text(), "mine\n")
+
     def test_first_pull_fetches_and_records(self):
         kinds.fetch_pull(self.ctx, self.art)
         self.assertEqual(self.fetches, 1)
@@ -1975,6 +1987,50 @@ class TestRemote(Base):
         with self.assertRaises(Oversized):
             remote.download("a.csv", self.root / "out/a.csv", 10)
         self.assertEqual(list((self.root / "out").iterdir()), [])
+
+    def test_a_fetch_is_bounded_though_nothing_promises_its_size(self):
+        """`fetch_url` was the one read path with no bound at all.
+
+        An archive is held to the size its manifest states; a `fetch` has no
+        manifest, so a ceiling is the only bound there is. The url being
+        trusted config does not supply one: `urlopen` follows redirects, so
+        the body need not come from the configured host at all.
+        """
+        d = Path(tempfile.mkdtemp(prefix="litkit-fetch-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        (d / "big.csv").write_bytes(b"x" * 5000)
+        dest = self.root / "data/positions.csv"
+
+        with unittest.mock.patch.object(transport, "MAX_FETCH", 1000):
+            with self.assertRaises(Oversized) as e:
+                transport.fetch_url((d / "big.csv").as_uri(), dest)
+        self.assertIn("a fetch is held to", str(e.exception))
+        self.assertFalse(dest.exists())
+        self.assertEqual(list(dest.parent.iterdir()), [])    # no .part either
+
+    def test_a_fetch_inside_the_ceiling_still_arrives(self):
+        d = Path(tempfile.mkdtemp(prefix="litkit-fetch-"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        (d / "ok.csv").write_bytes(b"a,b\n1,2\n")
+        dest = self.root / "data/positions.csv"
+        transport.fetch_url((d / "ok.csv").as_uri(), dest)
+        self.assertEqual(dest.read_bytes(), b"a,b\n1,2\n")
+
+    def test_an_oversized_fetch_is_not_retried(self):
+        calls = []
+
+        def big(req, timeout=None):
+            calls.append(req.full_url)
+            return Response(b"x" * 5000)
+
+        with unittest.mock.patch.object(transport.urllib.request, "urlopen",
+                                        big), \
+                unittest.mock.patch.object(transport, "MAX_FETCH", 10), \
+                unittest.mock.patch.object(transport, "BACKOFF", 0):
+            with self.assertRaises(Oversized):
+                transport.fetch_url("https://x.invalid/a.csv",
+                                    self.root / "data/positions.csv")
+        self.assertEqual(len(calls), 1)
 
 
 class StubS3:

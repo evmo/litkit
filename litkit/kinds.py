@@ -1023,7 +1023,11 @@ def fetch_pull(ctx, art, *, force=False, clean=False) -> None:
                 pass      # a server that will not answer HEAD still answers GET
 
     print(f"  {art.name:9} fetching    {art.url}", flush=True)
-    meta = fetch_url(art.url, dest)
+    try:
+        meta = fetch_url(art.url, dest)
+    except Oversized as e:
+        raise SystemExit(f"  {art.name}: {art.url} is {e} — {art.path} was "
+                         f"not touched") from None
     meta |= {"sha256": file_sha256(dest), "size": dest.stat().st_size}
     ctx.state["fetch"][art.name] = meta
     print(f"  {art.name:9} {human(meta['size'])} -> {art.path}")

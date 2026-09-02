@@ -45,6 +45,14 @@ CHUNK = 1 << 20
 ATTEMPTS = 3
 BACKOFF = 0.5
 
+# The `fetch` kind has no manifest, so nothing promises how big its file is —
+# unlike an archive, there is no honest number to hold the body to and refuse
+# for the lack of. A ceiling is the only bound available. It is deliberately
+# far above anything real: the largest `fetch` any consumer configures today
+# is 645 KB (catracker's all-positions.csv.gz), so this leaves four orders of
+# magnitude for a repository that fetches a multi-GB grid.
+MAX_FETCH = 8 << 30
+
 
 def _request(url: str, headers: dict[str, str] | None = None):
     return urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
@@ -306,14 +314,25 @@ def head(url: str) -> dict[str, str]:
 
 
 def fetch_url(url: str, dest: Path) -> dict[str, str]:
-    """Download an arbitrary URL, returning its validators."""
+    """Download an arbitrary URL, returning its validators.
+
+    Held to `MAX_FETCH`. This was the one read path in litkit with no bound
+    at all — `download` takes the size the manifest promised, `get_bytes` a
+    limit, the manifest itself `MAX_BYTES` — excused on the grounds that a
+    `fetch` url is trusted config. It is the *host* that is chosen, though,
+    not what it serves: `urlopen` follows redirects, so the body need not
+    come from the configured URL. Measured against a local server: a HEAD
+    advertising 12 bytes, a 302 off the configured path, and 8,388,608 bytes
+    written without complaint. That is also why the HEAD's Content-Length is
+    not used as the bound — it describes a response the GET need not receive.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
 
     def once():
         with urllib.request.urlopen(_request(url), timeout=TIMEOUT) as r, \
                 tmp.open("wb") as fh:
-            _drain(r, fh, None)
+            _drain(r, fh, MAX_FETCH)
             h = r.headers
             return {"etag": (h.get("ETag") or "").strip('"'),
                     "last_modified": h.get("Last-Modified") or ""}
@@ -321,6 +340,13 @@ def fetch_url(url: str, dest: Path) -> dict[str, str]:
     try:
         meta = _retrying(once, url)
         os.replace(tmp, dest)
+    except Oversized:
+        # `_drain` says "promised", which is the archive's case — there the
+        # number came from the manifest. Nothing promised this one.
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise Oversized(f"larger than the {MAX_FETCH:,} bytes a fetch is "
+                        f"held to") from None
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()
