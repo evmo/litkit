@@ -2,6 +2,12 @@
 # here reaches them the moment one of them bumps. Every supported interpreter
 # runs the suite; the build job proves the packaged wheel still carries
 # common.mk, which is the one file a consumer gets at by path.
+#
+# Every `uses:` is pinned to a commit SHA, with the release it was at in the
+# comment beside it. A tag is mutable — the owner can repoint `v4` at any
+# commit, which is the mechanism behind the action-supply-chain compromises,
+# and nothing in the run would look different. Bump these deliberately:
+# read the diff between the pinned SHA and the new one, then move the pin.
 
 name: ci
 
@@ -21,8 +27,8 @@ jobs:
       matrix:
         python: ["3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262    # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
         with:
           enable-cache: true
       - run: uv python install ${{ matrix.python }}
@@ -35,22 +41,22 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262    # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
       - run: uvx ruff check litkit tests
       - run: uv lock --check
 
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262    # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
       - run: uv build
       - name: the wheel must carry common.mk and py.typed
         run: |
           python -m zipfile -l dist/*.whl | grep -q 'litkit/data/common.mk'
           python -m zipfile -l dist/*.whl | grep -q 'litkit/py.typed'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: dist
           path: dist/
