@@ -176,9 +176,11 @@ class Blocked(Exception):
     working tree is still exactly as it was.
     """
 
-    def __init__(self, conflicts: list[tuple[Path, str]]):
+    def __init__(self, conflicts: list[tuple[Path, str]],
+                 why: str = "installing would fail partway"):
         super().__init__(f"{len(conflicts)} path(s) in the way")
         self.conflicts = conflicts
+        self.why = why
 
 
 def _blocked(dest: Path, stop: Path) -> tuple[Path, str] | None:
@@ -223,14 +225,15 @@ def _layout_lines(conflicts: list[tuple[Path, str]], root: Path) -> list[str]:
     return [f"    {k} is {v}" for k, v in seen.items()]
 
 
-def _refuse_layout(art, conflicts: list[tuple[Path, str]], root: Path):
+def _refuse_layout(art, conflicts: list[tuple[Path, str]], root: Path,
+                   why: str, hint: str):
     lines = _layout_lines(conflicts, root)
     return SystemExit(
         f"  {art.name}: the published layout no longer fits what is here, so "
-        f"installing would fail partway — {art.path} was not touched:\n"
+        f"{why} — {art.path} was not touched:\n"
         + "\n".join(lines[:10])
         + (f"\n    … and {len(lines) - 10:,} more" if len(lines) > 10 else "")
-        + "\n    Remove the path(s) named and pull again.")
+        + f"\n    {hint}")
 
 
 def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> None:
@@ -243,10 +246,21 @@ def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> None:
     Where the whole tree is being swapped, the old one is renamed into `attic`
     — inside the staging directory, which is about to be deleted anyway —
     rather than removed first, so the destination is never briefly absent.
+    That swap is only ever `--clean`'s to make: it throws away whatever was
+    there, and a merge may not destroy what it did not download.
     """
     if dest.is_symlink():
         dest = Path(os.path.realpath(dest))
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if not clean and dest.exists() and dest.is_dir() != staged.is_dir():
+        # The artifact itself changed shape. Swapping would rename the local
+        # copy into the attic, which goes with the staging tree — silently,
+        # and reporting success. It is the same conflict the merge refuses
+        # per file, one level up, and it costs the whole artifact.
+        raise Blocked([(dest, "a directory here, and a file in the bucket"
+                              if dest.is_dir() else
+                              "a file here, and a directory in the bucket")],
+                      "the whole artifact would be replaced")
     if clean or not dest.exists() or dest.is_dir() != staged.is_dir():
         if dest.exists():
             try:
@@ -420,7 +434,10 @@ def archive_pull(ctx, art, *, force=False, clean=False) -> None:
         try:
             _install(staged, dest, tmp / "replaced", clean=clean)
         except Blocked as b:
-            raise _refuse_layout(art, b.conflicts, ctx.cfg.root) from None
+            raise _refuse_layout(
+                art, b.conflicts, ctx.cfg.root, b.why,
+                f"Remove the path(s) named, or re-run with --clean to "
+                f"replace {art.path} with the bucket's copy.") from None
 
     final, n3, size3 = tree_hash(dest)
     note = "verified" if final == remote["tree_hash"] else (
@@ -675,7 +692,9 @@ def mirror_pull(ctx, art, *, force=False, clean=False, workers=8) -> None:
         here = _here(ctx, art).resolve()
         blocked = [c for _e, _s, d in moves if (c := _blocked(d, here))]
         if blocked:
-            raise _refuse_layout(art, blocked, ctx.cfg.root)
+            raise _refuse_layout(art, blocked, ctx.cfg.root,
+                                 "installing would fail partway",
+                                 "Remove the path(s) named and pull again.")
 
         # Verified, and every destination can be written: from here the
         # working tree may be changed. The layout check comes before the

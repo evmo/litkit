@@ -1210,6 +1210,41 @@ class TestArchive(Base):
         self.assertIn("data/cache was not touched", str(e.exception))
         self.assertEqual(tree_hash(self.root / "data/cache"), before)
 
+    def test_a_merge_may_not_replace_the_artifact_root_outright(self):
+        # The whole-tree swap renames the local copy into the attic, which
+        # goes with the staging tree. Without --clean that is a merge
+        # destroying what it did not download — silently, reporting success.
+        self.write("data/cache/1.json", "{}")
+        remote, man = Fake(), Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+        kinds.archive_push(ctx, self.art())
+
+        shutil.rmtree(self.root / "data/cache")
+        (self.root / "data/cache").write_text("irreplaceable local file")
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_pull(ctx, self.art())
+        self.assertIn("the whole artifact would be replaced", str(e.exception))
+        self.assertEqual((self.root / "data/cache").read_text(),
+                         "irreplaceable local file")
+
+        # --clean is what asks for the bucket's copy, and still gets it.
+        kinds.archive_pull(ctx, self.art(), clean=True)
+        self.assertEqual((self.root / "data/cache/1.json").read_text(), "{}")
+
+    def test_a_merge_may_not_replace_an_artifact_tree_with_a_file(self):
+        self.write("data/cache", "published as one file")
+        remote, man = Fake(), Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+        kinds.archive_push(ctx, self.art())
+
+        (self.root / "data/cache").unlink()
+        self.write("data/cache/mine.json", "irreplaceable local tree")
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_pull(ctx, self.art())
+        self.assertIn("the whole artifact would be replaced", str(e.exception))
+        self.assertEqual((self.root / "data/cache/mine.json").read_text(),
+                         "irreplaceable local tree")
+
     def test_clean_pull_replaces_a_conflicting_shape_outright(self):
         # --clean swaps the whole tree rather than merging into it, so it has
         # no per-file conflict to hit and must keep working.
