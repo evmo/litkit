@@ -23,6 +23,7 @@ import json
 import mimetypes
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
 import time
@@ -291,6 +292,55 @@ def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> None:
 # thousands. Identity is the hash of the *tree*, never of the bundle — see
 # hashing.tree_hash.
 
+class _Tar(tarfile.TarFile):
+    """A `TarFile` that leaves owner *names* out of the member headers.
+
+    `TarFile.gettarinfo` finishes every member with a `pwd.getpwuid` and a
+    `grp.getgrgid` to fill `uname`/`gname`. On a host whose
+    `/etc/nsswitch.conf` merges systemd's user database into `group` — the
+    Arch default — `getgrgid` is a socket round trip taken *after* the local
+    file has already answered: 300 µs a call here against about 45 µs of real
+    work per file, so packing a 20,000-file tree spent 94 % of its time
+    naming owners nobody ever reads back. `_unpack` extracts with the `data`
+    filter, which drops ownership outright, and an artifact's identity is
+    `tree_hash`, which never looked at it.
+
+    So the header is filled from the `lstat` alone. Numeric `uid`/`gid` are
+    still recorded; the names stay empty, which is exactly what the stdlib
+    itself writes on a platform with no `pwd` and `grp` module — and it makes
+    a bundle independent of the publisher's account names. The cases that
+    need more than an `lstat` to describe — a hardlink, a device, a fifo —
+    are rare enough in an artifact to hand back to the stdlib and pay for.
+    """
+
+    def gettarinfo(self, name=None, arcname=None, fileobj=None):
+        if fileobj is not None or self.dereference:
+            return super().gettarinfo(name, arcname, fileobj)
+        st = os.lstat(name)
+        if stat.S_ISREG(st.st_mode):
+            if st.st_nlink > 1:              # may be a hardlink to a member
+                return super().gettarinfo(name, arcname)
+            kind, linkname, size = tarfile.REGTYPE, "", st.st_size
+        elif stat.S_ISDIR(st.st_mode):
+            kind, linkname, size = tarfile.DIRTYPE, "", 0
+        elif stat.S_ISLNK(st.st_mode):
+            kind, linkname, size = tarfile.SYMTYPE, os.readlink(name), 0
+        else:
+            return super().gettarinfo(name, arcname)
+
+        info = self.tarinfo()
+        info.tarfile = self
+        _, arc = os.path.splitdrive(name if arcname is None else arcname)
+        info.name = arc.replace(os.sep, "/").lstrip("/")
+        info.mode = st.st_mode
+        info.uid, info.gid = st.st_uid, st.st_gid
+        info.size = size
+        info.mtime = st.st_mtime
+        info.type = kind
+        info.linkname = linkname
+        return info
+
+
 def _pack(root: Path, src: Path, dest: Path) -> None:
     # tar.add stores a symlink *as* a symlink and does not recurse into it, so
     # an artifact directory pointed at a scratch disk would otherwise publish
@@ -300,7 +350,7 @@ def _pack(root: Path, src: Path, dest: Path) -> None:
     real = Path(os.path.realpath(src))
     cctx = _zstd().ZstdCompressor(level=ZSTD_LEVEL, threads=-1)
     with dest.open("wb") as raw, cctx.stream_writer(raw) as z:
-        with tarfile.open(fileobj=z, mode="w|") as tar:
+        with _Tar.open(fileobj=z, mode="w|") as tar:
             tar.add(real, arcname=arcname)
 
 

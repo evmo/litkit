@@ -19,6 +19,7 @@ import io
 import json
 import os
 import shutil
+import tarfile
 import tempfile
 import time
 import unittest
@@ -1001,6 +1002,73 @@ class TestArchive(Base):
         shutil.rmtree(self.root / "data/cache")
         kinds.archive_pull(ctx, self.art())
         self.assertEqual(tree_hash(self.root / "data/cache"), before)
+
+    def test_packing_does_not_look_up_an_owner_name_per_file(self):
+        # tarfile.gettarinfo ends every member with pwd.getpwuid and
+        # grp.getgrgid. On a host whose nsswitch merges systemd's user
+        # database into `group` that is a socket round trip each — 300 µs
+        # against ~45 µs of real work — and it was 94 % of pack time on a
+        # 20,000-file tree. Nothing reads the names back: `data` extraction
+        # drops ownership and identity is the tree hash.
+        for i in range(40):
+            self.write(f"data/cache/{i}.json", "{}")
+        seen = []
+        real = tarfile.grp.getgrgid
+        with unittest.mock.patch.object(
+                tarfile.grp, "getgrgid",
+                lambda gid: (seen.append(gid), real(gid))[1]):
+            kinds.archive_push(Ctx(self.cfg, Fake(), Manifest({})), self.art())
+        self.assertEqual(seen, [], f"{len(seen)} group lookups while packing")
+
+    def test_packed_headers_carry_no_account_names(self):
+        # A bundle that names the publisher's accounts is one whose bytes
+        # depend on who ran the push.
+        self.write("data/cache/1.json", "{}")
+        remote = Fake()
+        kinds.archive_push(Ctx(self.cfg, remote, Manifest({})), self.art())
+        names = set()
+        dctx = kinds._zstd().ZstdDecompressor()
+        with dctx.stream_reader(
+                io.BytesIO(remote.objects["v1/data-cache.tar.zst"])) as z:
+            with tarfile.open(fileobj=z, mode="r|") as tar:
+                for m in tar:
+                    names |= {m.uname, m.gname}
+        self.assertEqual(names, {""})
+
+    def test_an_internal_symlink_survives_the_round_trip_as_a_link(self):
+        # _Tar builds the header itself, so the link has to keep its type and
+        # its target rather than arriving as a copy of the file.
+        self.write("data/cache/1.json", '{"n": 1}')
+        os.symlink("1.json", self.root / "data/cache/link.json")
+        before = tree_hash(self.root / "data/cache")
+
+        ctx = Ctx(self.cfg, Fake(), Manifest({}))
+        kinds.archive_push(ctx, self.art())
+        shutil.rmtree(self.root / "data/cache")
+        kinds.archive_pull(ctx, self.art())
+
+        link = self.root / "data/cache/link.json"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), "1.json")
+        self.assertEqual(tree_hash(self.root / "data/cache"), before)
+
+    def test_a_hardlink_is_still_packed_as_a_link(self):
+        # The fast header path skips anything with st_nlink > 1, so the
+        # stdlib's inode bookkeeping still turns the second name into a
+        # LNKTYPE member instead of a second copy of the bytes.
+        self.write("data/cache/1.json", '{"n": 1}')
+        os.link(self.root / "data/cache/1.json",
+                self.root / "data/cache/same.json")
+        remote = Fake()
+        kinds.archive_push(Ctx(self.cfg, remote, Manifest({})), self.art())
+        types = {}
+        dctx = kinds._zstd().ZstdDecompressor()
+        with dctx.stream_reader(
+                io.BytesIO(remote.objects["v1/data-cache.tar.zst"])) as z:
+            with tarfile.open(fileobj=z, mode="r|") as tar:
+                for m in tar:
+                    types[m.name] = m.type
+        self.assertIn(tarfile.LNKTYPE, types.values())
 
     def test_pull_clean_removes_local_extras(self):
         self.write("data/cache/1.json", "{}")
