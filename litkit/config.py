@@ -223,10 +223,27 @@ def load(root: Path | None = None) -> Config:
     except paths.Unsafe as e:
         raise SystemExit(str(e)) from None
 
+    # A `fetch` url is checked for its scheme (above); `base` was not, though
+    # it is the larger trust boundary of the two — the manifest and every
+    # artifact byte a credential-free reader installs arrive from it, and the
+    # digests that vouch for them arrive from it too. Over cleartext anyone on
+    # the path substitutes all of it at once; the path checks still confine
+    # the writes to `data/` and `out/`, but not what lands there. `urlopen`
+    # would also honour file:// and ftp://, which is a typo or a trick.
+    # https only: it is what the docstring above and the README already
+    # promise. An absent `base` is the S3-API configuration and stays valid.
+    base = remote.get("base", "").rstrip("/")
+    if base and urllib.parse.urlparse(base).scheme != "https":
+        raise SystemExit(
+            f"[remote] base must be an https:// URL, not {base!r} — it is "
+            f"where a reader with no credentials gets both the artifacts and "
+            f"the digests that vouch for them.\n"
+            f"    Remove `base` to read over the S3 API with `.r2` instead.")
+
     return Config(
         root=root,
         artifacts=tuple(arts),
-        base=remote.get("base", "").rstrip("/"),
+        base=base,
         bucket=remote.get("bucket", ""),
         manifest_key=manifest_key,
     )

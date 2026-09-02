@@ -227,6 +227,31 @@ class TestConfig(Base):
             self.reload('[remote]\nmanifest = "/etc/passwd"\n\n'
                         '[artifact.x]\nkind = "mirror"\npath = "out"\n')
 
+    def _with_base(self, base):
+        return self.reload(f'[remote]\nbase = "{base}"\n\n'
+                           '[artifact.x]\nkind = "mirror"\npath = "out"\n')
+
+    def test_base_must_be_https(self):
+        """`base` is where a credential-free reader gets the artifacts *and*
+        the digests that vouch for them, so cleartext hands both to anyone on
+        the path. `urlopen` would also open file:// and ftp://."""
+        for base in ("http://artifacts.example.org", "file:///tmp",
+                     "ftp://artifacts.example.org", "javascript:alert(1)",
+                     "artifacts.example.org"):
+            with self.subTest(base=base):
+                with self.assertRaises(SystemExit) as e:
+                    self._with_base(base)
+                self.assertIn("must be an https", str(e.exception))
+
+    def test_an_https_base_is_accepted_and_keeps_its_trailing_slash_trimmed(self):
+        cfg = self._with_base("https://artifacts.example.org/mirror/")
+        self.assertEqual(cfg.base, "https://artifacts.example.org/mirror")
+
+    def test_no_base_at_all_is_the_s3_configuration_and_still_loads(self):
+        cfg = self.reload('[remote]\nbucket = "b"\n\n'
+                          '[artifact.x]\nkind = "mirror"\npath = "out"\n')
+        self.assertEqual(cfg.base, "")
+
 
 # --- path containment -------------------------------------------------------
 
