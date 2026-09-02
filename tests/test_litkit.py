@@ -1546,6 +1546,87 @@ class TestArchive(Base):
         ctx = Ctx(self.cfg, Fake(), Manifest({}))
         self.assertEqual(kinds.archive_status(ctx, self.art()).verdict, "absent")
 
+    # --- the size the download is held to ----------------------------------
+    # `archive_bytes` is the only bound on the bundle before its sha-256 can
+    # be checked, and the manifest is the untrusted side. A bucket that says
+    # nothing, or says zero, used to hand `download` no limit at all.
+
+    def _recording(self):
+        """A bucket that remembers the cap each download was given."""
+        remote = Fake()
+        caps = []
+        real = remote.download
+
+        def download(key, dest, max_bytes=None):
+            caps.append(max_bytes)
+            return real(key, dest, max_bytes)
+
+        remote.download = download
+        return remote, caps
+
+    def _published(self):
+        self.write("data/cache/1.json", '{"n": 1}')
+        remote, caps = self._recording()
+        man = Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+        kinds.archive_push(ctx, self.art())
+        return ctx, man, caps
+
+    def test_the_download_is_held_to_the_size_the_manifest_promises(self):
+        ctx, man, caps = self._published()
+        promised = man.get("cache")["archive_bytes"]
+        self.assertGreater(promised, 0)
+        kinds.archive_pull(ctx, self.art(), force=True)
+        self.assertEqual(caps, [promised])          # not None
+
+    def test_an_archive_entry_promising_zero_bytes_is_refused(self):
+        ctx, man, caps = self._published()
+        before = tree_hash(self.root / "data/cache")
+        man.artifacts["cache"]["archive_bytes"] = 0
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_pull(ctx, self.art(), force=True)
+        self.assertIn("does not say how big", str(e.exception))
+        self.assertIn("litkit push cache", str(e.exception))
+        # Refused *before* the request, so no unbounded body is ever drained.
+        self.assertEqual(caps, [])
+        self.assertEqual(tree_hash(self.root / "data/cache"), before)
+
+    def test_an_archive_entry_with_no_size_at_all_is_refused_by_name(self):
+        # Absent rather than zero: this used to be a bare KeyError traceback.
+        ctx, man, caps = self._published()
+        del man.artifacts["cache"]["archive_bytes"]
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_pull(ctx, self.art(), force=True)
+        self.assertIn("does not say how big", str(e.exception))
+        self.assertEqual(caps, [])
+
+    def test_a_bundle_longer_than_promised_never_reaches_the_disk(self):
+        """End to end over the real `Remote`, which is what enforces the cap.
+
+        `Fake.download` copies whatever it holds; only `remote._drain` counts
+        bytes. So this one runs the public read path against a `file://`
+        bucket holding a body far larger than the manifest admits to.
+        """
+        self.write("data/cache/1.json", '{"n": 1}')
+        fake, man = Fake(), Manifest({})
+        kinds.archive_push(Ctx(self.cfg, fake, man), self.art())
+        before = tree_hash(self.root / "data/cache")
+
+        bucket = Path(tempfile.mkdtemp(prefix="litkit-oversize-"))
+        self.addCleanup(shutil.rmtree, bucket, ignore_errors=True)
+        key = man.get("cache")["key"]
+        (bucket / key).parent.mkdir(parents=True, exist_ok=True)
+        (bucket / key).write_bytes(b"x" * (4 << 20))
+
+        cfg = dataclasses.replace(self.cfg, base=bucket.as_uri())
+        ctx = Ctx(cfg, Remote(cfg), man)
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_pull(ctx, self.art(), force=True)
+        self.assertIn("longer than the", str(e.exception))
+        self.assertEqual(tree_hash(self.root / "data/cache"), before)
+
 
 # --- the fetch kind ---------------------------------------------------------
 

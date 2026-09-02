@@ -441,15 +441,31 @@ def archive_pull(ctx, art, *, force=False, clean=False) -> None:
         print(f"  {art.name:9} up to date  ({n:,} files, {human(size)})")
         return
 
-    print(f"  {art.name:9} downloading {human(remote['archive_bytes'])}"
-          f" -> {art.path} ({remote['files']:,} files,"
-          f" {human(remote['raw_bytes'])} unpacked)", flush=True)
+    # The only bound on this download is the size the manifest promises, and
+    # `manifest._int` lets that be absent or zero — at which point `x or None`
+    # handed `download` "no limit" and a lying bucket could write until the
+    # disk filled, the sha-256 being checked only once the whole body is down.
+    # An untrusted number may tighten this bound; it may not remove it. Zero
+    # is not a size a bundle can have (`archive_push` writes the packed file's
+    # own length), so refuse by name rather than invent a ceiling, and say
+    # which command mends the bucket. Refused here and not in `Manifest.load`
+    # so that the `push` which would rewrite the entry can still read it.
+    promised = remote.get("archive_bytes") or 0
+    if promised <= 0:
+        raise SystemExit(
+            f"  {art.name}: the manifest in the bucket does not say how big "
+            f"{remote['key']} is, so there is no size to hold the download "
+            f"to — {art.path} was not touched.\n"
+            f"    `litkit push {art.name}` republishes it with one.")
+
+    print(f"  {art.name:9} downloading {human(promised)}"
+          f" -> {art.path} ({remote.get('files', 0):,} files,"
+          f" {human(remote.get('raw_bytes', 0))} unpacked)", flush=True)
     with _staging(ctx.cfg) as tmp:
         tmp = Path(tmp)
         bundle = tmp / "bundle.tar.zst"
         try:
-            ctx.remote.download(remote["key"], bundle,
-                                remote.get("archive_bytes") or None)
+            ctx.remote.download(remote["key"], bundle, promised)
         except Oversized as e:
             raise SystemExit(f"  {art.name}: {e} — {art.path} was not "
                              f"touched") from None
