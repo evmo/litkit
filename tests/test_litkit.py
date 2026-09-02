@@ -933,6 +933,24 @@ class TestMirror(Base):
             self.assertEqual((self.root / "out/m.csv/inner.csv").read_text(),
                              "irreplaceable")
 
+    def test_the_artifact_directory_itself_may_be_the_file_in_the_way(self):
+        # The same conflict one level up: the bucket holds a tree under
+        # `out`, this checkout still holds a single file called `out`. The
+        # mirror kind has no whole-tree swap to fall back on, so the move
+        # loop's mkdir raised after the download had verified.
+        self.write("out/a.csv", "published")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+
+        shutil.rmtree(self.root / "out")
+        (self.root / "out").write_text("out is a file here")
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.mirror_pull(ctx, self.art())
+        self.assertIn("out was not touched", str(e.exception))
+        self.assertEqual((self.root / "out").read_text(), "out is a file here")
+
     def test_a_published_directory_where_a_file_sits_here_is_refused(self):
         # The other direction: mkdir(parents=True) of a parent that is a file
         # raises, from the same place.

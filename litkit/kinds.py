@@ -197,11 +197,16 @@ def _blocked(dest: Path, stop: Path) -> tuple[Path, str] | None:
     """
     if dest.is_dir() and not dest.is_symlink():
         return (dest, "a directory here, and a file in the bucket")
+    # Up to and including `stop`: the artifact's own directory can be the
+    # thing in the way, when the bucket holds a tree where this checkout
+    # still holds a single file of that name.
     for anc in dest.parents:
-        if anc == stop or stop not in anc.parents:
+        if anc != stop and stop not in anc.parents:
             break
         if anc.is_file():
             return (anc, "a file here, and a directory in the bucket")
+        if anc == stop:
+            break
     return None
 
 
