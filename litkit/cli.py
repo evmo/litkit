@@ -113,7 +113,10 @@ def cmd_push(args) -> int:
     _banner(ctx, arts)
     try:
         for art in arts:
-            kinds.push(ctx, art, force=args.force, dry_run=args.dry_run)
+            kw = {"force": args.force, "dry_run": args.dry_run}
+            if art.kind == "mirror":
+                kw["workers"] = args.workers
+            kinds.push(ctx, art, **kw)
     finally:
         # Written last, once, and from a `finally`: objects go to the bucket
         # under their own names, so a push that dies partway has already
@@ -278,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="upload even if the remote copy already matches")
     p.add_argument("--dry-run", action="store_true",
                    help="report what would move, upload nothing")
+    p.add_argument("-w", "--workers", type=_positive, default=8,
+                   help="parallel uploads for the `mirror` kind")
     p.set_defaults(func=cmd_push)
 
     p = with_names(sub.add_parser(

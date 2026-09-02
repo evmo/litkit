@@ -17,6 +17,7 @@ non-zero exit and leaves the previous local copy exactly as it was.
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import contextlib
 import errno
 import json
@@ -26,6 +27,7 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -815,7 +817,8 @@ def _mirror_entry(art, local: dict, known: dict, uploaded: set,
             "raw_bytes": sum(f["size"] for f in files), "files": files}
 
 
-def mirror_push(ctx, art, *, force=False, dry_run=False) -> bool:
+def mirror_push(ctx, art, *, force=False, dry_run=False,
+                workers=8) -> bool:
     base = _here(ctx, art)
     local, total = _local_index(ctx, art)
     # An empty directory is a publishable state — it is how deleting the last
@@ -856,18 +859,39 @@ def mirror_push(ctx, art, *, force=False, dry_run=False) -> bool:
     uploaded: set[str] = set()      # the PUT returned *and* the bytes held
     sent: set[str] = set()          # the PUT returned; the object has moved
     raced: list[str] = []
-    try:
-        for i, e in enumerate(todo, 1):
-            full = ctx.cfg.root / e["path"]
-            ctype = mimetypes.guess_type(str(full))[0] or "application/octet-stream"
-            ctx.remote.upload(full, e["path"], ctype)
+    # `sent` is added to by the worker the instant its PUT returns, under a
+    # lock, and not by the main thread when it gets round to the result.
+    # Whatever ends the push, the manifest is written from these two sets, and
+    # a file whose object has already moved has to be in `sent` by then — a
+    # result still sitting in an uncollected future would otherwise leave the
+    # manifest naming the digest the bucket held *before*, which is the one
+    # thing `_mirror_entry` exists to avoid.
+    landed = threading.Lock()
+
+    def send(e: dict) -> tuple[dict, bool]:
+        full = ctx.cfg.root / e["path"]
+        ctype = mimetypes.guess_type(str(full))[0] or "application/octet-stream"
+        ctx.remote.upload(full, e["path"], ctype)
+        with landed:
             sent.add(e["path"])
-            # The digest was taken before the upload started, so a file
-            # rewritten in between would be published under a digest the
-            # object does not have — and every reader would then fail to
-            # verify it. Re-reading the file is the only way to know that
-            # the bytes which went up are the bytes being described.
-            if not _unchanged(full, e):
+        # The digest was taken before the upload started, so a file
+        # rewritten in between would be published under a digest the
+        # object does not have — and every reader would then fail to
+        # verify it. Re-reading the file is the only way to know that
+        # the bytes which went up are the bytes being described.
+        return e, _unchanged(full, e)
+
+    # One PUT is one round trip, and doing them one after another made a push
+    # take as long as the bucket is far away: 200 objects at 50 ms was 10.1 s
+    # serial against 1.3 s for the pull of the same files, which has run eight
+    # wide through `download_many` all along. Same width, same `--workers`.
+    futures: list[cf.Future] = []
+    pool = cf.ThreadPoolExecutor(max_workers=max(1, workers))
+    try:
+        futures = [pool.submit(send, e) for e in todo]
+        for i, fut in enumerate(cf.as_completed(futures), 1):
+            e, held = fut.result()
+            if not held:
                 raced.append(e["path"])
                 print(f"    [{i}/{len(todo)}] {'changed':>12}  {e['path']}"
                       f"  — rewritten mid-upload", flush=True)
@@ -875,6 +899,19 @@ def mirror_push(ctx, art, *, force=False, dry_run=False) -> bool:
             uploaded.add(e["path"])
             print(f"    [{i}/{len(todo)}] {e['size']:>12,}  {e['path']}", flush=True)
     finally:
+        # A failed upload is the answer for the whole push, so the queued ones
+        # are dropped rather than each spending its own socket timeout — the
+        # same reasoning as `download_many`.
+        pool.shutdown(wait=True, cancel_futures=True)
+        # The ones that finished while the main thread was busy with a failure
+        # elsewhere still landed and still verified. Collect them, or a push
+        # that dies at eight-wide throws away up to seven good uploads the
+        # serial loop would have recorded.
+        for fut in futures:
+            if fut.done() and not fut.cancelled() and not fut.exception():
+                e, held = fut.result()
+                if held:
+                    uploaded.add(e["path"])
         # Even an interrupted push leaves the manifest describing the objects
         # that did land; `cli.cmd_push` commits it on the way out. A file
         # whose PUT returned but did not verify — including one interrupted

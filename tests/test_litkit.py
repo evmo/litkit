@@ -21,6 +21,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -783,6 +784,97 @@ class TestMirror(Base):
             remote.objects[p]).hexdigest() for p in listed}
         self.assertEqual(listed, in_bucket)
         self.assertNotEqual(listed, on_disk)        # one upload did not happen
+
+    def test_a_concurrent_push_that_fails_still_describes_the_bucket(self):
+        # Uploads run eight wide now, so when one fails the others are still
+        # in flight. Whatever the manifest ends up listing has to be what the
+        # bucket actually holds — a file whose PUT landed while the main
+        # thread was handling the failure may not be left carrying the digest
+        # the bucket had *before* it landed.
+        for i in range(6):
+            self.write(f"out/f{i}.csv", f"v1-{i}")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())              # v1 published
+        v1 = {e["path"]: e["sha256"] for e in man.mirror_files("out")}
+        self.assertEqual(len(v1), 6)
+
+        for i in range(6):
+            self.write(f"out/f{i}.csv", f"v2-{i}")
+        real_upload = remote.upload
+        lock = threading.Lock()
+
+        def upload(src, key, content_type):
+            if key.endswith("f0.csv"):
+                raise OSError("connection reset")   # fails first, at once
+            time.sleep(0.05)                        # the rest are still going
+            with lock:
+                real_upload(src, key, content_type)
+
+        remote.upload = upload
+        with self.assertRaises(OSError):
+            kinds.mirror_push(ctx, self.art())
+
+        listed = {e["path"]: e["sha256"] for e in man.mirror_files("out")}
+        in_bucket = {p: hashlib.sha256(remote.objects[p]).hexdigest()
+                     for p in listed}
+        # Nothing is described by a digest the bucket does not hold …
+        self.assertEqual(listed, in_bucket)
+        # … and the five that did land are recorded, not thrown away.
+        landed = [p for p in listed if listed[p] != v1[p]]
+        self.assertEqual(len(landed), 5, listed)
+
+    def test_a_put_that_lands_but_cannot_be_re_read_is_dropped(self):
+        # The PUT returned, so the object has moved; if the re-read that
+        # decides whether the bytes are describable then blows up, the file
+        # has to be left out of the manifest rather than keep the digest the
+        # bucket held before. This is why the worker records `sent` itself
+        # instead of the main thread doing it from the result.
+        self.write("out/a.csv", "v1")
+        self.write("out/b.csv", "v1")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        v1 = {e["path"]: e["sha256"] for e in man.mirror_files("out")}
+
+        self.write("out/a.csv", "v2")
+        self.write("out/b.csv", "v2")
+        real_unchanged = kinds._unchanged
+
+        def unchanged(path, e):
+            if path.name == "a.csv":
+                raise RuntimeError("stat blew up after the PUT")
+            return real_unchanged(path, e)
+
+        with unittest.mock.patch.object(kinds, "_unchanged", unchanged):
+            with self.assertRaises(RuntimeError):
+                kinds.mirror_push(ctx, self.art())
+
+        listed = {e["path"]: e["sha256"] for e in man.mirror_files("out")}
+        self.assertNotIn("out/a.csv", listed)           # not listed at all …
+        self.assertNotEqual(                            # … and it did move
+            v1["out/a.csv"],
+            hashlib.sha256(remote.objects["out/a.csv"]).hexdigest())
+
+    def test_push_takes_a_worker_count_like_pull(self):
+        for i in range(4):
+            self.write(f"out/f{i}.csv", str(i))
+        remote, man = Fake(), Manifest({})
+        seen = set()
+
+        real_upload = remote.upload
+        lock = threading.Lock()
+
+        def upload(src, key, content_type):
+            seen.add(threading.current_thread().name)
+            time.sleep(0.02)
+            with lock:
+                real_upload(src, key, content_type)
+
+        remote.upload = upload
+        kinds.mirror_push(self.ctx(man, remote), self.art(), workers=1)
+        self.assertEqual(len(seen), 1)                  # honoured, not ignored
+        self.assertEqual(len(man.mirror_files("out")), 4)
 
     def test_a_file_rewritten_while_it_uploads_is_not_published(self):
         # The digest is taken before the upload; a file that moves in between
