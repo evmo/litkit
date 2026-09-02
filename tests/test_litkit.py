@@ -377,10 +377,14 @@ class TestManifestMigration(Base):
         self.assertEqual({e["path"] for e in m.mirror_files("out")},
                          {"out/a.csv", "out/sub/b.json"})
         self.assertEqual(m.get("out")["kind"], "mirror")
-        # data/cache is declared as an archive here, but the legacy list is
-        # still grouped onto it by path — the point is that no record is lost.
-        self.assertEqual(len(m.get("cache")["files"]), 1)
-        self.assertEqual(m.orphans, [])
+        # data/cache is declared as an archive, and a flat list is a
+        # mirror-shaped record: filing one under it would manufacture an
+        # entry of the wrong kind that every verb then raises on. The point
+        # is still that no record is lost — it is kept as an orphan, and
+        # dump() writes it back out.
+        self.assertIsNone(m.get("cache"))
+        self.assertEqual([e["path"] for e in m.orphans], ["data/cache/c.bin"])
+        self.assertIn(b"data/cache/c.bin", m.dump())
 
     def test_files_no_artifact_claims_are_kept_as_orphans(self):
         raw = {"files": [{"path": "elsewhere/x", "size": 1, "sha256": H1}]}
@@ -775,6 +779,25 @@ class TestMirror(Base):
                 kinds.mirror_push(ctx, self.art())
         self.assertEqual(man.mirror_files("out"), [])
 
+    def test_a_manifest_of_another_kind_is_refused_not_a_traceback(self):
+        # The other direction: sync.toml says mirror, the entry is an
+        # archive, and `files` is a count. Iterating it raised TypeError
+        # from status, pull *and* push.
+        self.write("out/a.csv", "A")
+        man = Manifest({"out": {
+            "kind": "archive", "path": "out", "key": "k", "tree_hash": H1,
+            "archive_sha256": H2, "archive_bytes": 1, "raw_bytes": 1,
+            "files": 3}})
+        ctx = self.ctx(man, Fake())
+        for verb in (kinds.mirror_status, kinds.mirror_pull):
+            with self.assertRaises(SystemExit) as e:
+                verb(ctx, self.art())
+            self.assertIn("declares this a mirror", str(e.exception))
+
+        self.assertTrue(kinds.mirror_push(ctx, self.art()))
+        self.assertEqual(man.get("out")["kind"], "mirror")
+        self.assertEqual(len(man.mirror_files("out")), 1)
+
     def test_status_reports_missing_stale_and_extra(self):
         self.write("out/a.csv", "hello")
         remote, man = Fake(), Manifest({})
@@ -1114,6 +1137,26 @@ class TestArchive(Base):
         self.write("data/cache/foo/x.json", "local")
         kinds.archive_pull(ctx, self.art(), clean=True)
         self.assertEqual(tree_hash(self.root / "data/cache"), after)
+
+    def test_a_manifest_of_another_kind_is_refused_not_a_traceback(self):
+        # sync.toml says archive; the bucket's entry is a mirror. Reaching
+        # into it raised KeyError('tree_hash') from pull and a TypeError
+        # formatting a list as a number from status.
+        self.write("data/cache/1.json", "{}")
+        man = Manifest({"cache": {
+            "kind": "mirror", "path": "data/cache",
+            "files": [{"path": "data/cache/1.json", "size": 2,
+                       "sha256": H1}]}})
+        ctx = Ctx(self.cfg, Fake(), man)
+        for verb in (kinds.archive_status, kinds.archive_pull):
+            with self.assertRaises(SystemExit) as e:
+                verb(ctx, self.art())
+            self.assertIn("declares this a archive", str(e.exception))
+
+        # …and push is the way back: it replaces the entry rather than
+        # refusing, so the bucket never becomes unwritable.
+        self.assertTrue(kinds.archive_push(ctx, self.art()))
+        self.assertEqual(man.get("cache")["kind"], "archive")
 
     def test_status_absent_both_sides(self):
         ctx = Ctx(self.cfg, Fake(), Manifest({}))

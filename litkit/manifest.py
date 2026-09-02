@@ -30,7 +30,9 @@ Two older shapes are read transparently, so migrating a bucket does not mean
 re-uploading it:
   - `{"artifacts": {name: {tree_hash, ...}}}` with no `kind` (archives)
   - `{"files": [{path, size, sha256}]}` — a flat list, grouped back onto the
-    artifacts whose `path` contains each file.
+    *mirror* artifacts whose `path` contains each file. A flat list is a
+    mirror-shaped record, so anything under an artifact of another kind is
+    kept as an orphan rather than filed as a mirror entry it is not.
 """
 
 from __future__ import annotations
@@ -182,11 +184,17 @@ class Manifest:
         if flat and not arts:
             _check_files(flat, "files", None)
             by_art: dict[str, list] = {}
+            # Only onto artifacts the config still calls mirrors. A flat
+            # list is a mirror-shaped record; filing one under an artifact
+            # that is now an archive manufactures an entry of the wrong kind,
+            # which every verb then reaches into and raises on. Those records
+            # are kept as orphans instead, so none is lost.
             for entry in flat:
                 for art in cfg.artifacts:
                     prefix = art.path.as_posix().rstrip("/") + "/"
-                    if entry["path"] == art.path.as_posix() or \
-                            entry["path"].startswith(prefix):
+                    if art.kind == "mirror" and (
+                            entry["path"] == art.path.as_posix()
+                            or entry["path"].startswith(prefix)):
                         by_art.setdefault(art.name, []).append(entry)
                         break
                 else:

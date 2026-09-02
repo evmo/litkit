@@ -93,6 +93,40 @@ def _dest(ctx, art, rel: str) -> Path:
         raise SystemExit(f"  {e}") from None
 
 
+def _entry(ctx, art) -> dict | None:
+    """The manifest entry for this artifact, if this kind can read it.
+
+    `sync.toml` says what an artifact is; the manifest says what the bucket
+    last held. The two can disagree — someone edits `kind`, or a legacy flat
+    list is migrated — and nothing compared them, so every verb reached into
+    an entry of the wrong shape and raised: KeyError on `tree_hash`, a
+    TypeError formatting a list as a number, another iterating a file count.
+
+    Refused by name here, for the verbs that have nothing to compare. `push`
+    goes through `_prior` instead: replacing the entry is how the bucket is
+    put right, and refusing that would leave a repository no way back.
+    """
+    e = ctx.manifest.get(art.name)
+    if e and e.get("kind") != art.kind:
+        raise SystemExit(
+            f"  {art.name}: sync.toml declares this a {art.kind}, but the "
+            f"manifest in the bucket describes a {e.get('kind')} — there is "
+            f"nothing here to compare it with.\n"
+            f"    `litkit push {art.name}` republishes it as a {art.kind}.")
+    return e
+
+
+def _prior(ctx, art) -> dict:
+    """The manifest entry a push should build on, or {} if there is none it
+    can use. An entry of another kind is dropped with a note, not refused."""
+    e = ctx.manifest.get(art.name) or {}
+    if e and e.get("kind") != art.kind:
+        print(f"  {art.name:9} replacing the manifest's {e.get('kind')} entry "
+              f"— sync.toml declares this a {art.kind}")
+        return {}
+    return e
+
+
 def _staging(cfg):
     """A scratch directory on the same filesystem as the checkout.
 
@@ -299,7 +333,7 @@ def _unpack(archive: Path, root: Path) -> None:
 
 def archive_status(ctx, art) -> Report:
     digest, n, size = tree_hash(_here(ctx, art))
-    remote = ctx.manifest.get(art.name) or {}
+    remote = _entry(ctx, art) or {}
     local_s = f"{n:,} files, {human(size)}" if digest else "absent"
     remote_s = (f"{remote.get('files', 0):,} files, "
                 f"{human(remote.get('raw_bytes', 0))}" if remote else "absent")
@@ -315,7 +349,7 @@ def archive_status(ctx, art) -> Report:
 
 
 def archive_pull(ctx, art, *, force=False, clean=False) -> None:
-    remote = ctx.manifest.get(art.name)
+    remote = _entry(ctx, art)
     if not remote:
         print(f"  {art.name:9} not in the bucket")
         return
@@ -408,7 +442,7 @@ def archive_push(ctx, art, *, force=False, dry_run=False) -> bool:
               f"targets inside {art.path}, then re-run `litkit push`.")
 
     digest, n, size = tree_hash(src)
-    remote = ctx.manifest.get(art.name) or {}
+    remote = _prior(ctx, art)
     if remote.get("tree_hash") == digest and not force:
         print(f"  {art.name:9} up to date  ({n:,} files, {human(size)})")
         return False
@@ -504,7 +538,7 @@ def _remote_index(ctx, art) -> list[dict]:
             return False
         return True
 
-    return [e for e in ctx.manifest.mirror_files(art.name)
+    return [e for e in (_entry(ctx, art) or {}).get("files", [])
             if not judgeable(e.get("path")) or _covers(art, e["path"])]
 
 
@@ -688,7 +722,7 @@ def mirror_push(ctx, art, *, force=False, dry_run=False) -> bool:
     if not local and not base.exists():
         print(f"  {art.name:9} skipped — {art.path} is not here")
         return False
-    known = {e["path"]: e for e in ctx.manifest.mirror_files(art.name)}
+    known = {e["path"]: e for e in _prior(ctx, art).get("files", [])}
     todo = [e for e in local.values()
             if force or known.get(e["path"], {}).get("sha256") != e["sha256"]]
     gone = sorted(known.keys() - local.keys())
