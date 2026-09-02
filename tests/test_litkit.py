@@ -29,7 +29,7 @@ from pathlib import Path
 
 from litkit import cli, config, creds, kinds, paths
 from litkit import remote as transport
-from litkit.hashing import file_sha256, tree_hash
+from litkit.hashing import file_sha256, human, tree_hash
 from litkit.manifest import Malformed, Manifest
 from litkit.remote import Conflict, Missing, Oversized, Remote, _url
 
@@ -1002,6 +1002,98 @@ class TestArchive(Base):
         shutil.rmtree(self.root / "data/cache")
         kinds.archive_pull(ctx, self.art())
         self.assertEqual(tree_hash(self.root / "data/cache"), before)
+
+    def _bundle_with_a_stray(self, remote):
+        """Repack the published bundle with one extra file beside the
+        artifact, and correct the manifest's archive digest to match.
+
+        The tree hash still describes `data/cache` alone, so the only thing
+        that can catch the extra file is the stray walk.
+        """
+        key = "v1/data-cache.tar.zst"
+        dctx = kinds._zstd().ZstdDecompressor()
+        buf = io.BytesIO()
+        cctx = kinds._zstd().ZstdCompressor(level=1)
+        with cctx.stream_writer(buf, closefd=False) as z:
+            with tarfile.open(fileobj=z, mode="w|") as out:
+                with dctx.stream_reader(io.BytesIO(remote.objects[key])) as r:
+                    with tarfile.open(fileobj=r, mode="r|") as src:
+                        for m in src:
+                            out.addfile(m, src.extractfile(m)
+                                        if m.isreg() else None)
+                info = tarfile.TarInfo("evil.txt")
+                info.size = 4
+                out.addfile(info, io.BytesIO(b"boo\n"))
+        remote.objects[key] = buf.getvalue()
+        entry = dict(self.man_for_stray.get("cache"))
+        entry["archive_sha256"] = hashlib.sha256(buf.getvalue()).hexdigest()
+        entry["archive_bytes"] = len(buf.getvalue())
+        self.man_for_stray.set("cache", entry)
+
+    def test_a_bundle_holding_a_file_outside_the_artifact_is_refused(self):
+        # The stray walk skips the artifact's own subtree, which cannot hold
+        # a stray. It still has to catch one that lands beside it.
+        self.write("data/cache/1.json", '{"n": 1}')
+        remote, man = Fake(), Manifest({})
+        self.man_for_stray = man
+        ctx = Ctx(self.cfg, remote, man)
+        kinds.archive_push(ctx, self.art())
+        self._bundle_with_a_stray(remote)
+
+        before = tree_hash(self.root / "data/cache")
+        with self.assertRaises(SystemExit) as cm:
+            with contextlib.redirect_stdout(io.StringIO()):
+                kinds.archive_pull(ctx, self.art(), force=True)
+        self.assertIn("1 file(s) outside data/cache", str(cm.exception))
+        self.assertIn("evil.txt", str(cm.exception))
+        self.assertEqual(tree_hash(self.root / "data/cache"), before)
+        self.assertFalse((self.root / "evil.txt").exists())
+
+    def test_a_fresh_pull_reports_the_tree_it_verified(self):
+        # The closing line no longer re-reads a tree it just renamed into
+        # place, so its counts have to come out the same as before.
+        for i in range(5):
+            self.write(f"data/cache/{i}.json", f'{{"n": {i}}}')
+        digest, n, size = tree_hash(self.root / "data/cache")
+        ctx = Ctx(self.cfg, Fake(), Manifest({}))
+        kinds.archive_push(ctx, self.art())
+        shutil.rmtree(self.root / "data/cache")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kinds.archive_pull(ctx, self.art())
+        self.assertIn("verified", out.getvalue())
+        self.assertIn(f"({n:,} files, {human(size)})", out.getvalue())
+        self.assertEqual(tree_hash(self.root / "data/cache"), (digest, n, size))
+
+    def test_a_merge_pull_still_counts_the_local_extras_it_kept(self):
+        # The merge is the one path where the destination holds more than the
+        # tree that was verified, so it is the one that still re-reads.
+        self.write("data/cache/1.json", '{"n": 1}')
+        ctx = Ctx(self.cfg, Fake(), Manifest({}))
+        kinds.archive_push(ctx, self.art())
+        self.write("data/cache/mine.json", '{"n": 2}')
+        _, n, size = tree_hash(self.root / "data/cache")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kinds.archive_pull(ctx, self.art(), force=True)
+        self.assertIn("local extras remain", out.getvalue())
+        self.assertIn(f"({n:,} files, {human(size)})", out.getvalue())
+
+    def test_a_clean_pull_reports_only_the_buckets_tree(self):
+        self.write("data/cache/1.json", '{"n": 1}')
+        ctx = Ctx(self.cfg, Fake(), Manifest({}))
+        kinds.archive_push(ctx, self.art())
+        digest, n, size = tree_hash(self.root / "data/cache")
+        self.write("data/cache/mine.json", '{"n": 2}')
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kinds.archive_pull(ctx, self.art(), force=True, clean=True)
+        self.assertIn("verified", out.getvalue())
+        self.assertIn(f"({n:,} files, {human(size)})", out.getvalue())
+        self.assertEqual(tree_hash(self.root / "data/cache")[0], digest)
 
     def test_packing_does_not_look_up_an_owner_name_per_file(self):
         # tarfile.gettarinfo ends every member with pwd.getpwuid and

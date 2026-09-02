@@ -67,3 +67,33 @@ true, delete it.
   Then an index scoped to the *local* tree reads only — `archive_status`, the
   pre-push digest, the pre-pull compare — and explicitly refused at
   `kinds.py:421`, is worth writing. Accepted 2026-09-02.
+
+- **`litkit/kinds.py:285` — `_install`'s merge loop is not worth restructuring,
+  and the reason the audit gave for it is wrong.**
+  audit-perf on 2026-09-02 raised this inside its "pull walks and hashes more
+  times than verification needs" finding: "at 50,000 files the split was
+  0.94 s in layout checks, 0.18 s in renames, and 2.46 s in the per-file
+  `mkdir` and path arithmetic, over only 2,048 distinct parent directories".
+  The two passes that finding was mostly about — the stray walk and the
+  closing hash — are fixed. This third part is not.
+
+  Measured here at 50,000 files over the same 2,048 parents: the `mkdir` is
+  not the cost. Remembering which parents already exist cuts the calls from
+  50,000 to 2,048 and the move loop from 1.29 s to 1.24 s — 0.05 s, because
+  `mkdir(exist_ok=True)` on a directory that is already there is about a
+  microsecond. What actually costs is the per-file layout check: `_blocked`
+  is 1.72–1.89 s, and cProfile puts that in `pathlib` object construction
+  (850,000 `PurePath.__init__`, 700,000 `_PathParents.__getitem__`) from
+  walking `.parents` once per file rather than once per directory. Memoising
+  the ancestor walk per distinct parent gives 1.23 s for a byte-identical
+  answer.
+
+  That is 0.66 s at 50,000 files. The largest artifact any consumer merges
+  today is 2,965 files, where it is under 0.05 s, and unlike the two passes
+  that were removed this one is not a deletion — it splits `_blocked` in two
+  and puts a cache in its caller, on the path that decides whether a pull is
+  allowed to touch the working tree at all.
+
+  What would change this: a real artifact past roughly 50,000 files that is
+  pulled without `--clean`, which is the only path this loop runs on.
+  Accepted 2026-09-02.

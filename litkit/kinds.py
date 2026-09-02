@@ -237,8 +237,13 @@ def _refuse_layout(art, conflicts: list[tuple[Path, str]], root: Path,
         + f"\n    {hint}")
 
 
-def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> None:
-    """Move a verified staging tree onto the destination.
+def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> bool:
+    """Move a verified staging tree onto the destination. True if it merged.
+
+    A merge is the one outcome the caller cannot predict: the destination
+    ends up holding whatever local files the bundle did not name as well as
+    the ones it did. Every other path renames the verified tree into place,
+    so the caller already knows what is there.
 
     A destination that is a symlink is followed, not replaced: someone who
     pointed `out/` at a scratch disk meant the artifact to live there, and a
@@ -271,10 +276,10 @@ def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> None:
                     raise
                 shutil.rmtree(dest) if dest.is_dir() else dest.unlink()
         _move(staged, dest)
-        return
+        return False
     if staged.is_file():
         _move(staged, dest)
-        return
+        return False
     files = sorted(p for p in staged.rglob("*") if p.is_file())
     blocked = [c for src in files
                if (c := _blocked(dest / src.relative_to(staged), dest))]
@@ -284,6 +289,7 @@ def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> None:
         target = dest / src.relative_to(staged)
         target.parent.mkdir(parents=True, exist_ok=True)
         _move(src, target)
+    return True
 
 
 # --------------------------------------------------------------- archive ----
@@ -465,10 +471,24 @@ def archive_pull(ctx, art, *, force=False, clean=False) -> None:
         bundle.unlink()
 
         staged = tree.joinpath(*art.path.parts)
-        stray = [p.relative_to(tree).as_posix() for p in tree.rglob("*")
-                 if p.is_file() and not paths.is_under(
-                     p.relative_to(tree).as_posix(), art.path.as_posix())]
-        after, _, _ = tree_hash(staged)
+        # Every file under the artifact's own subtree is under `art.path` by
+        # construction, so walking it to look for files *outside* `art.path`
+        # can only ever answer no. Prune it: at 100,000 files that walk was
+        # 2.9 s of a 19 s pull, and 0.00 s once pruned, for the same answer.
+        # The predicate is still the one that decides, so a bundle that puts
+        # the artifact somewhere unexpected is caught exactly as before.
+        stray = []
+        for dirpath, dirnames, filenames in os.walk(tree):
+            here = Path(dirpath)
+            if here == staged:
+                dirnames[:] = []
+                continue
+            for name in filenames:
+                rel = (here / name).relative_to(tree).as_posix()
+                if ((here / name).is_file()
+                        and not paths.is_under(rel, art.path.as_posix())):
+                    stray.append(rel)
+        after, n2, size2 = tree_hash(staged)
         if stray or after != remote["tree_hash"]:
             raise SystemExit(
                 f"  {art.name}: the bundle is not the tree the manifest "
@@ -482,14 +502,18 @@ def archive_pull(ctx, art, *, force=False, clean=False) -> None:
         # merge is checked for conflicts first, so `_install` cannot fail
         # halfway through and leave a tree that is neither copy.
         try:
-            _install(staged, dest, tmp / "replaced", clean=clean)
+            merged = _install(staged, dest, tmp / "replaced", clean=clean)
         except Blocked as b:
             raise _refuse_layout(
                 art, b.conflicts, ctx.cfg.root, b.why,
                 f"Remove the path(s) named, or re-run with --clean to "
                 f"replace {art.path} with the bucket's copy.") from None
 
-    final, n3, size3 = tree_hash(dest)
+    # Only a merge can have left something the verification did not see. Any
+    # other path renamed the tree that was just hashed into place, and a
+    # rename cannot change its bytes — reading all of them back to say so was
+    # another 3.0 s of that same 19 s pull.
+    final, n3, size3 = (tree_hash(dest) if merged else (after, n2, size2))
     note = "verified" if final == remote["tree_hash"] else (
         "merged — local extras remain, so the tree is a superset of the "
         "bucket's (re-run with --clean for an exact copy)")
