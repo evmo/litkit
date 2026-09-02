@@ -97,3 +97,40 @@ true, delete it.
   What would change this: a real artifact past roughly 50,000 files that is
   pulled without `--clean`, which is the only path this loop runs on.
   Accepted 2026-09-02.
+
+- **`litkit/remote.py:180` — the public read path really does open a
+  connection per object, and it is staying that way for now.**
+  Reported by audit-perf on 2026-09-02 as low. Reproduced: a `download_many`
+  of 40 objects at 8 workers against a local HTTP/1.1 server that offers
+  keep-alive accepted **40 TCP connections from 40 distinct client ports**.
+  `urllib.request.urlopen` does not pool, exactly as reported.
+
+  The half the audit said it could not measure — "that part could not be
+  measured here and is inferred" — is measured now, against the real bucket
+  a reader pulls from. Ten GETs of `nyad-currents.ultraswimming.org/
+  manifest.json` (157,817 B), DNS warmed, best of three rounds:
+
+      urlopen per object (today)   210.2 ms   rounds [213, 210, 211]
+      one reused connection         85.7 ms   rounds [ 88,  86,  96]
+      handshake per object         124.5 ms
+
+  So the inference was right, and slightly conservative. The largest real
+  mirror is nyad-currents at 840 files across two artifacts, where that is
+  **13.1 s of a fresh `make sync`** at 8 workers — a sync that also moves
+  about 1 GB of NetCDF.
+
+  Not fixed because of what the fix costs. `urlopen` is carrying redirects,
+  the `HTTPError` codes that `_transient` reads to decide what is worth
+  retrying, the 404 that `get_bytes` turns into `Missing`, chunked bodies and
+  proxy configuration. Hand-managed `http.client` connections in a
+  `threading.local` re-derive all of that, plus discard-and-reconnect on a
+  socket that died between requests — new machinery on the one path every
+  credential-free reader depends on, and the path where the last two audits
+  already found two real bugs (no retries at all, and a conditional PUT
+  misreading its own success). Thirteen seconds once per clone does not buy
+  that.
+
+  What would change this: a mirror of a few thousand small files, where the
+  handshakes cost more than the bytes do — at 5,000 files it is 78 s — or a
+  profile of a real `make sync` where connect time beats transfer time.
+  Accepted 2026-09-02.
