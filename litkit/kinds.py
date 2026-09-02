@@ -130,6 +130,65 @@ def _move(src: Path, dest: Path) -> None:
         shutil.move(str(src), str(dest))
 
 
+class Blocked(Exception):
+    """Installing would fail partway, because the local layout is in the way.
+
+    Raised before anything has moved, so the caller can refuse while the
+    working tree is still exactly as it was.
+    """
+
+    def __init__(self, conflicts: list[tuple[Path, str]]):
+        super().__init__(f"{len(conflicts)} path(s) in the way")
+        self.conflicts = conflicts
+
+
+def _blocked(dest: Path, stop: Path) -> tuple[Path, str] | None:
+    """Why a verified file could not be installed at `dest`, or None.
+
+    `os.replace` of a file onto a directory raises IsADirectoryError, and
+    `mkdir(parents=True)` of a parent that is already a file raises
+    FileExistsError. Both happen inside the install step, past the point where
+    a pull has promised the working tree is safe to change, and both leave it
+    half-installed — so the layout is looked at before that point rather than
+    after. It happens whenever a published path changes between a file and a
+    directory and a reader still holds the old shape.
+
+    A symlink is not in the way: `os.replace` replaces the link itself, and
+    `mkdir(exist_ok=True)` is content with a link to a directory.
+    """
+    if dest.is_dir() and not dest.is_symlink():
+        return (dest, "a directory here, and a file in the bucket")
+    for anc in dest.parents:
+        if anc == stop or stop not in anc.parents:
+            break
+        if anc.is_file():
+            return (anc, "a file here, and a directory in the bucket")
+    return None
+
+
+def _layout_lines(conflicts: list[tuple[Path, str]], root: Path) -> list[str]:
+    """One line per distinct path in the way — several files under the same
+    conflicting ancestor are one problem, not many."""
+    seen: dict[str, str] = {}
+    for p, why in conflicts:
+        try:
+            shown = p.relative_to(root).as_posix()
+        except ValueError:
+            shown = str(p)
+        seen.setdefault(shown, why)
+    return [f"    {k} is {v}" for k, v in seen.items()]
+
+
+def _refuse_layout(art, conflicts: list[tuple[Path, str]], root: Path):
+    lines = _layout_lines(conflicts, root)
+    return SystemExit(
+        f"  {art.name}: the published layout no longer fits what is here, so "
+        f"installing would fail partway — {art.path} was not touched:\n"
+        + "\n".join(lines[:10])
+        + (f"\n    … and {len(lines) - 10:,} more" if len(lines) > 10 else "")
+        + "\n    Remove the path(s) named and pull again.")
+
+
 def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> None:
     """Move a verified staging tree onto the destination.
 
@@ -157,7 +216,12 @@ def _install(staged: Path, dest: Path, attic: Path, *, clean: bool) -> None:
     if staged.is_file():
         _move(staged, dest)
         return
-    for src in sorted(p for p in staged.rglob("*") if p.is_file()):
+    files = sorted(p for p in staged.rglob("*") if p.is_file())
+    blocked = [c for src in files
+               if (c := _blocked(dest / src.relative_to(staged), dest))]
+    if blocked:
+        raise Blocked(blocked)
+    for src in files:
         target = dest / src.relative_to(staged)
         target.parent.mkdir(parents=True, exist_ok=True)
         _move(src, target)
@@ -278,8 +342,13 @@ def archive_pull(ctx, art, *, force=False, clean=False) -> None:
                 + f"    expected {remote['tree_hash']}\n"
                   f"    got      {after}")
 
-        # Verified: from here the working tree may be changed.
-        _install(staged, dest, tmp / "replaced", clean=clean)
+        # Verified: from here the working tree may be changed — and the
+        # merge is checked for conflicts first, so `_install` cannot fail
+        # halfway through and leave a tree that is neither copy.
+        try:
+            _install(staged, dest, tmp / "replaced", clean=clean)
+        except Blocked as b:
+            raise _refuse_layout(art, b.conflicts, ctx.cfg.root) from None
 
     final, n3, size3 = tree_hash(dest)
     note = "verified" if final == remote["tree_hash"] else (
@@ -481,7 +550,14 @@ def mirror_pull(ctx, art, *, force=False, clean=False, workers=8) -> None:
                 "\n".join(f"    {p}" for p in bad[:10]) +
                 (f"\n    … and {len(bad) - 10:,} more" if len(bad) > 10 else ""))
 
-        # Verified: from here the working tree may be changed.
+        here = _here(ctx, art).resolve()
+        blocked = [c for _e, _s, d in moves if (c := _blocked(d, here))]
+        if blocked:
+            raise _refuse_layout(art, blocked, ctx.cfg.root)
+
+        # Verified, and every destination can be written: from here the
+        # working tree may be changed. The layout check comes before the
+        # sweep, so a refusal costs nothing at all.
         if clean:
             sweep()
         for _e, staged, dest in moves:

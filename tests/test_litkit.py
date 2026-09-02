@@ -722,6 +722,50 @@ class TestMirror(Base):
                          "irreplaceable")
         self.assertEqual((self.root / "out/a.csv").read_text(), "hello")
 
+    def test_a_published_file_where_a_directory_sits_here_is_refused(self):
+        # The published layout changed shape under a reader who still holds
+        # the old one. os.replace of a file onto a directory raises from
+        # inside the install loop — past the point where the pull has said
+        # the tree is safe to change, so the tree ends up neither copy.
+        for rel in ("out/a.csv", "out/m.csv", "out/z.csv"):
+            self.write(rel, "published")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+
+        (self.root / "out/m.csv").unlink()
+        self.write("out/m.csv/inner.csv", "irreplaceable")
+        self.write("out/a.csv", "local")
+
+        for clean in (False, True):
+            with self.assertRaises(SystemExit) as e:
+                kinds.mirror_pull(ctx, self.art(), clean=clean)
+            self.assertIn("out was not touched", str(e.exception))
+            self.assertIn("out/m.csv", str(e.exception))
+            # Nothing installed, and --clean swept nothing on the way out.
+            self.assertEqual((self.root / "out/a.csv").read_text(), "local")
+            self.assertEqual((self.root / "out/m.csv/inner.csv").read_text(),
+                             "irreplaceable")
+
+    def test_a_published_directory_where_a_file_sits_here_is_refused(self):
+        # The other direction: mkdir(parents=True) of a parent that is a file
+        # raises, from the same place.
+        self.write("out/a.csv", "published")
+        self.write("out/sub.csv/x.csv", "published")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+
+        shutil.rmtree(self.root / "out/sub.csv")
+        self.write("out/sub.csv", "was a file")
+        self.write("out/a.csv", "local")
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.mirror_pull(ctx, self.art())
+        self.assertIn("out was not touched", str(e.exception))
+        self.assertEqual((self.root / "out/a.csv").read_text(), "local")
+        self.assertEqual((self.root / "out/sub.csv").read_text(), "was a file")
+
 
 # --- the archive kind -------------------------------------------------------
 
@@ -875,6 +919,59 @@ class TestArchive(Base):
         self.assertIn("changed while it was being packed", str(e.exception))
         self.assertEqual(remote.objects, {})
         self.assertIsNone(man.get("cache"))
+
+    def test_a_merge_that_would_fail_partway_is_refused_first(self):
+        # A merge moves file by file, so a path that changed between a file
+        # and a directory raises after some of them have already landed. The
+        # conflict is looked for before the first move instead.
+        self.write("data/cache/a.json", "published")
+        self.write("data/cache/foo", "published")
+        remote, man = Fake(), Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+        kinds.archive_push(ctx, self.art())
+
+        (self.root / "data/cache/foo").unlink()
+        self.write("data/cache/foo/x.json", "irreplaceable")
+        self.write("data/cache/a.json", "local")
+        before = tree_hash(self.root / "data/cache")
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_pull(ctx, self.art())
+        self.assertIn("data/cache was not touched", str(e.exception))
+        self.assertIn("data/cache/foo", str(e.exception))
+        self.assertEqual(tree_hash(self.root / "data/cache"), before)
+
+    def test_a_merge_onto_a_file_that_became_a_directory_is_refused(self):
+        self.write("data/cache/a.json", "published")
+        self.write("data/cache/foo/x.json", "published")
+        remote, man = Fake(), Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+        kinds.archive_push(ctx, self.art())
+
+        shutil.rmtree(self.root / "data/cache/foo")
+        self.write("data/cache/foo", "was a file")
+        self.write("data/cache/a.json", "local")
+        before = tree_hash(self.root / "data/cache")
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_pull(ctx, self.art())
+        self.assertIn("data/cache was not touched", str(e.exception))
+        self.assertEqual(tree_hash(self.root / "data/cache"), before)
+
+    def test_clean_pull_replaces_a_conflicting_shape_outright(self):
+        # --clean swaps the whole tree rather than merging into it, so it has
+        # no per-file conflict to hit and must keep working.
+        self.write("data/cache/a.json", "published")
+        self.write("data/cache/foo", "published")
+        remote, man = Fake(), Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+        kinds.archive_push(ctx, self.art())
+        after = tree_hash(self.root / "data/cache")
+
+        (self.root / "data/cache/foo").unlink()
+        self.write("data/cache/foo/x.json", "local")
+        kinds.archive_pull(ctx, self.art(), clean=True)
+        self.assertEqual(tree_hash(self.root / "data/cache"), after)
 
     def test_status_absent_both_sides(self):
         ctx = Ctx(self.cfg, Fake(), Manifest({}))
