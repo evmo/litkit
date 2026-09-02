@@ -193,6 +193,13 @@ def load(root: Path | None = None) -> Config:
             if urllib.parse.urlparse(url).scheme not in ("http", "https"):
                 raise SystemExit(f"artifact {name!r}: url must be http(s), "
                                  f"not {url!r}")
+        if kind != "mirror" and "include" in spec:
+            # Only `_walk` reads it, and only a mirror walks. Accepting it
+            # elsewhere reads as a filter that is quietly doing nothing.
+            raise SystemExit(f"artifact {name!r}: `include` chooses which "
+                             f"files a mirror publishes, and nothing reads it "
+                             f"on {'an' if kind[:1] in 'aeiou' else 'a'} "
+                             f"{kind}. Remove it, or make this a mirror.")
         if kind == "archive":
             _rel(spec["key"], name, "key")
         arts.append(Artifact(

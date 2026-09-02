@@ -151,6 +151,16 @@ class TestConfig(Base):
                                               f"include = {bad}"))
             self.assertIn("include", str(e.exception))
 
+    def test_include_is_refused_on_a_kind_that_never_reads_it(self):
+        # Only `_walk` reads `include`, and only a mirror walks. Accepted
+        # elsewhere it reads as a filter that is quietly doing nothing.
+        with self.assertRaises(SystemExit) as e:
+            self.reload(SYNC_TOML.replace(
+                'key  = "v1/data-cache.tar.zst"',
+                'key  = "v1/data-cache.tar.zst"\ninclude = [".json"]'))
+        self.assertIn("include", str(e.exception))
+        self.assertIn("archive", str(e.exception))
+
     def test_an_empty_include_still_means_every_file(self):
         cfg = self.reload(SYNC_TOML.replace('include = [".csv", ".json"]',
                                             "include = []"))
