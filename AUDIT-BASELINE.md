@@ -28,6 +28,38 @@ true, delete it.
 
 ## Real, and deliberately not changed
 
+- **`litkit/paths.py` — `relative` accepts Unicode bidi overrides, and that
+  is where the line is drawn.**
+  Not from an audit: noticed while fixing the audit-security finding that
+  control characters in a manifest path reach the terminal unescaped
+  (53e08eb). The same question asked of U+202E and friends has a different
+  answer, so it is recorded here rather than left for the next run to raise
+  as new. Verified live: `paths.relative` accepts
+  `out/annual-report\u202evsc.pdf`, which a terminal renders as
+  `out/annual-reportfdp.csv` while the extension on disk is really `pdf`.
+
+  Two things make it unlike the control characters, which were refused. A
+  bidi override reorders only the characters of the name it sits in — it
+  cannot erase or repaint litkit's own output the way `\x1b[2K\r` can, so
+  the forged "verified" line that motivated that fix is not available here.
+  And litkit executes nothing it pulls: the bytes land under the real name,
+  and every downstream tool reads that name, not its rendering.
+
+  Against that, refusing them has a real cost. Legitimate Arabic and Hebrew
+  filenames carry directional marks: `out/\u200fتقرير.csv` and
+  `out/\u200ereport.csv` both validate today and would keep validating
+  under a marks-only carve-out, but the carve-out is the part that has to be
+  got right, and getting it wrong refuses a name someone published in good
+  faith. A defect that misrenders a filename is worth less than a bug that
+  makes a repository unpullable.
+
+  What would change this: litkit growing a path that *acts* on a name rather
+  than storing it — opening it by extension, handing it to a shell, choosing
+  a program from it. Then the rendering and the bytes disagreeing starts to
+  matter. The precise cut if that day comes is U+202A–U+202E and
+  U+2066–U+2069 (the embeddings, overrides and isolates), leaving U+200E and
+  U+200F alone. Accepted 2026-09-02.
+
 - **`litkit/hashing.py:24` — `tree_hash` re-reads every byte on every call,
   and there is no digest cache.**
   Reported by audit-perf on 2026-09-02 as medium, suggesting an index under
