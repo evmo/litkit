@@ -246,6 +246,34 @@ def _pack(root: Path, src: Path, dest: Path) -> None:
             tar.add(real, arcname=arcname)
 
 
+def _escaping_links(src: Path) -> list[tuple[Path, Path]]:
+    """Symlinks under `src` whose target is outside it.
+
+    `tar.add` stores a link *as* a link, while `tree_hash` reads *through* it
+    — so a link out of the artifact is hashed as its target's bytes but packed
+    as a reference to a path only this machine has. The push exits 0 and
+    `status` says in sync; every reader's pull then fails, because the `data`
+    extraction filter refuses a link that leaves the destination, and nothing
+    on the publisher's side ever says so. The publishing end is the only place
+    that can see the difference, so it is where this is refused.
+
+    A link that stays inside the artifact is fine, and stays fine: it packs,
+    extracts and hashes the same on both sides.
+    """
+    root = Path(os.path.realpath(src))
+    if not root.is_dir():
+        return []                      # the artifact is one file; _pack reads
+                                       # through it and stores a regular file
+    out = []
+    for p in sorted(root.rglob("*")):  # rglob does not descend through links
+        if not p.is_symlink():
+            continue
+        target = Path(os.path.realpath(p))
+        if target != root and root not in target.parents:
+            out.append((p.relative_to(root), target))
+    return out
+
+
 def _unpack(archive: Path, root: Path) -> None:
     """Extract into `root`, one member at a time so the counters can bite.
 
@@ -362,6 +390,22 @@ def archive_push(ctx, art, *, force=False, dry_run=False) -> bool:
     if not src.exists():
         print(f"  {art.name:9} skipped — {art.path} is not here")
         return False
+
+    # Before the hash, not after: the walk is far cheaper than reading every
+    # byte, and an artifact that cannot be published is worth saying so about
+    # even on a push that would otherwise have found nothing to do.
+    escaping = _escaping_links(src)
+    if escaping:
+        raise SystemExit(
+            f"  {art.name}: {art.path} holds {len(escaping):,} symlink(s) "
+            f"pointing outside it, which pack as links no reader can follow "
+            f"— nothing was uploaded:\n"
+            + "\n".join(f"    {(art.path / rel).as_posix()} -> {t}"
+                        for rel, t in escaping[:10])
+            + (f"\n    … and {len(escaping) - 10:,} more"
+               if len(escaping) > 10 else "")
+            + f"\n    Replace them with the files themselves, or move the "
+              f"targets inside {art.path}, then re-run `litkit push`.")
 
     digest, n, size = tree_hash(src)
     remote = ctx.manifest.get(art.name) or {}

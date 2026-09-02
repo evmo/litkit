@@ -920,6 +920,54 @@ class TestArchive(Base):
         self.assertEqual(remote.objects, {})
         self.assertIsNone(man.get("cache"))
 
+    def test_a_symlink_out_of_the_artifact_is_refused_at_push(self):
+        # tar stores the link as a link; tree_hash reads through it. So the
+        # bundle would carry a reference to a path only this machine has,
+        # while the manifest carried the target's bytes — push exit 0,
+        # status "in sync", and every reader's pull failing on the `data`
+        # extraction filter.
+        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "big.bin").write_text("BIG")
+        self.write("data/cache/1.json", "{}")
+        (self.root / "data/cache/big.bin").symlink_to(outside / "big.bin")
+
+        remote, man = Fake(), Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_push(ctx, self.art())
+        self.assertIn("nothing was uploaded", str(e.exception))
+        self.assertIn("data/cache/big.bin", str(e.exception))
+        self.assertEqual(remote.objects, {})
+        self.assertIsNone(man.get("cache"))
+
+    def test_a_symlinked_directory_out_of_the_artifact_is_refused_too(self):
+        # Worse than a file link: rglob does not descend through it, so the
+        # tree hash does not even see the contents it would publish.
+        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (outside / "x.json").write_text("{}")
+        self.write("data/cache/1.json", "{}")
+        (self.root / "data/cache/sub").symlink_to(outside)
+
+        ctx = Ctx(self.cfg, Fake(), Manifest({}))
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_push(ctx, self.art())
+        self.assertIn("data/cache/sub", str(e.exception))
+
+    def test_a_symlink_inside_the_artifact_still_round_trips(self):
+        self.write("data/cache/real.json", "{}")
+        (self.root / "data/cache/link.json").symlink_to("real.json")
+        remote, man = Fake(), Manifest({})
+        ctx = Ctx(self.cfg, remote, man)
+        self.assertTrue(kinds.archive_push(ctx, self.art()))
+        self.assertEqual(kinds.archive_status(ctx, self.art()).verdict,
+                         "in sync")
+
+        shutil.rmtree(self.root / "data/cache")
+        kinds.archive_pull(ctx, self.art())
+        self.assertEqual((self.root / "data/cache/link.json").read_text(), "{}")
+
     def test_a_merge_that_would_fail_partway_is_refused_first(self):
         # A merge moves file by file, so a path that changed between a file
         # and a directory raises after some of them have already landed. The
