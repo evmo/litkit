@@ -106,14 +106,25 @@ def _check_files(entries, where: str, under: str | None) -> None:
 
 
 def _check_artifact(name: str, e: dict, prefix: str | None) -> None:
+    """`prefix` is where `sync.toml` currently puts this artifact, used only
+    when the entry does not say where it put itself.
+
+    Containment is measured against the entry's own `path`, not the config's.
+    An entry says where the bucket's copy lives; the config says where this
+    checkout wants it, and the two differ for as long as it takes to rename
+    an artifact's `path`. Measuring against the config rejected the whole
+    document over that — including for the push that would have rewritten it,
+    leaving no way out but hand-editing the object in the bucket. Nothing is
+    lost by moving the check: what a path is allowed to *touch* is decided
+    per write by `_dest`, against the config, whatever the manifest claims.
+    """
     where = f"artifact {name!r}"
     if not isinstance(e, dict):
         raise _bad(where, f"must be an object, not {type(e).__name__}")
     if e.get("kind") not in MANIFEST_KINDS:
         raise _bad(where, f"kind must be one of "
                           f"{', '.join(MANIFEST_KINDS)}, not {e.get('kind')!r}")
-    if "path" in e:
-        _rel(e["path"], where, "path")
+    own = _rel(e["path"], where, "path") if "path" in e else None
     if e["kind"] == "archive":
         _rel(e.get("key"), where, "key")
         _digest(e, "tree_hash", where)
@@ -121,7 +132,7 @@ def _check_artifact(name: str, e: dict, prefix: str | None) -> None:
         for f in ("archive_bytes", "raw_bytes", "files"):
             _int(e, f, where)
     else:
-        _check_files(e.get("files", []), where, prefix)
+        _check_files(e.get("files", []), where, own or prefix)
 
 
 class Manifest:

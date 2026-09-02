@@ -386,6 +386,27 @@ class TestManifestMigration(Base):
         self.assertEqual([e["path"] for e in m.orphans], ["data/cache/c.bin"])
         self.assertIn(b"data/cache/c.bin", m.dump())
 
+    def test_a_renamed_artifact_path_still_loads(self):
+        # The bucket's copy lives under `out`; sync.toml now says `results`.
+        # Measuring containment against the config rejected the whole
+        # document — including for the push that would have rewritten it.
+        cfg = self.reload(SYNC_TOML.replace('path = "out"',
+                                            'path = "results"'))
+        self.assertEqual({a.name: a.path.as_posix() for a in cfg.artifacts}
+                         ["out"], "results")
+        raw = {"artifacts": {"out": {
+            "kind": "mirror", "path": "out",
+            "files": [{"path": "out/x.csv", "size": 1, "sha256": H1}]}}}
+        m = Manifest._migrate(raw, cfg)
+        self.assertEqual(len(m.mirror_files("out")), 1)
+
+    def test_an_entry_still_may_not_stray_from_its_own_path(self):
+        raw = {"artifacts": {"out": {
+            "kind": "mirror", "path": "out",
+            "files": [{"path": "elsewhere/x", "size": 1, "sha256": H1}]}}}
+        with self.assertRaises(Malformed):
+            Manifest._migrate(raw, self.cfg)
+
     def test_files_no_artifact_claims_are_kept_as_orphans(self):
         raw = {"files": [{"path": "elsewhere/x", "size": 1, "sha256": H1}]}
         m = Manifest._migrate(raw, self.cfg)
@@ -643,6 +664,33 @@ class TestMirror(Base):
         with self.assertRaises(SystemExit):
             kinds.mirror_pull(self.ctx(man, remote), self.art())
         self.assertFalse((self.root.parent / "escape").exists())
+
+    def test_a_stale_path_loads_but_pull_refuses_and_push_mends_it(self):
+        # What the load-time check used to buy, bought per write instead:
+        # the entry is readable, so status and push work, and every path it
+        # names is still measured against the config before anything lands.
+        self.write("out/x.csv", "X")
+        remote, man = Fake(), Manifest({})
+        kinds.mirror_push(self.ctx(man, remote), self.art())
+
+        (self.root / "results").mkdir()
+        (self.root / "out/x.csv").rename(self.root / "results/x.csv")
+        cfg = self.reload(SYNC_TOML.replace('path = "out"',
+                                            'path = "results"'))
+        art = {a.name: a for a in cfg.artifacts}["out"]
+        self.assertEqual(art.path.as_posix(), "results")
+        ctx = Ctx(cfg, remote, Manifest._migrate(
+            json.loads(man.dump()), cfg))
+
+        self.assertFalse(kinds.mirror_status(ctx, art).ok)
+        with self.assertRaises(SystemExit) as e:
+            kinds.mirror_pull(ctx, art)
+        self.assertIn("is not under results/", str(e.exception))
+        self.assertFalse((self.root / "out/x.csv").exists())   # wrote nothing
+
+        self.assertTrue(kinds.mirror_push(ctx, art))
+        self.assertEqual([f["path"] for f in ctx.manifest.mirror_files("out")],
+                         ["results/x.csv"])
 
     def test_pull_into_a_symlinked_artifact_directory_stays_inside_it(self):
         outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
