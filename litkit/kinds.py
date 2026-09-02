@@ -610,19 +610,32 @@ def mirror_pull(ctx, art, *, force=False, clean=False, workers=8) -> None:
     print(f"  {art.name:9} {len(want):,} fetched and verified -> {art.path}")
 
 
-def _mirror_entry(art, local: dict, known: dict, uploaded: set) -> dict:
+def _mirror_entry(art, local: dict, known: dict, uploaded: set,
+                  sent: set) -> dict:
     """What the bucket holds, as best this push knows.
 
-    A file is listed with its local digest if it was just uploaded or was
-    already current. One whose upload did not happen keeps the digest the
-    bucket had before, because that is still what is there. One with neither
-    is not in the bucket at all, and so is not listed. Building the entry this
-    way is what lets the manifest be written even when a push dies partway:
-    it describes what happened rather than what was intended.
+    A file is listed with its local digest if it was uploaded and re-read
+    unchanged, or was already current. One whose upload never started keeps
+    the digest the bucket had before, because that is still what is there.
+    One with neither is not in the bucket at all, and so is not listed.
+    Building the entry this way is what lets the manifest be written even
+    when a push dies partway: it describes what happened rather than what
+    was intended.
+
+    The fourth case is why `sent` is tracked apart from `uploaded`: a file
+    whose PUT *returned* but whose re-read then disagreed — because the
+    pipeline rewrote it, or because the run was interrupted before the
+    re-read finished — has moved the object to bytes this push cannot name.
+    Its previous digest is no longer what is there, and its local digest was
+    never what went up, so listing either would put a digest in the manifest
+    that the bucket does not hold and fail every reader's pull. It is left
+    out, and the next push re-uploads it.
     """
     files = []
     for rel in sorted(local):
         e = local[rel]
+        if rel in sent and rel not in uploaded:
+            continue
         if rel in uploaded or known.get(rel, {}).get("sha256") == e["sha256"]:
             files.append(e)
         elif rel in known:
@@ -660,13 +673,15 @@ def mirror_push(ctx, art, *, force=False, dry_run=False) -> bool:
             print(f"    {'drop':>12}  {rel}")
         return False
 
-    uploaded: set[str] = set()
+    uploaded: set[str] = set()      # the PUT returned *and* the bytes held
+    sent: set[str] = set()          # the PUT returned; the object has moved
     raced: list[str] = []
     try:
         for i, e in enumerate(todo, 1):
             full = ctx.cfg.root / e["path"]
             ctype = mimetypes.guess_type(str(full))[0] or "application/octet-stream"
             ctx.remote.upload(full, e["path"], ctype)
+            sent.add(e["path"])
             # The digest was taken before the upload started, so a file
             # rewritten in between would be published under a digest the
             # object does not have — and every reader would then fail to
@@ -681,11 +696,13 @@ def mirror_push(ctx, art, *, force=False, dry_run=False) -> bool:
             print(f"    [{i}/{len(todo)}] {e['size']:>12,}  {e['path']}", flush=True)
     finally:
         # Even an interrupted push leaves the manifest describing the objects
-        # that did land; `cli.cmd_push` commits it on the way out. A file that
-        # raced is left out of `uploaded`, so it keeps the digest the bucket
-        # had before — or, if it is new, is not listed at all. Either way the
-        # next push sees it as changed and re-uploads it.
-        ctx.manifest.set(art.name, _mirror_entry(art, local, known, uploaded))
+        # that did land; `cli.cmd_push` commits it on the way out. A file
+        # whose PUT returned but did not verify — including one interrupted
+        # between the two — is dropped rather than left with a digest that is
+        # no longer in the bucket. Either way the next push sees it as changed
+        # and re-uploads it.
+        ctx.manifest.set(art.name,
+                         _mirror_entry(art, local, known, uploaded, sent))
     if raced:
         raise SystemExit(
             f"  {art.name}: {len(raced)} file(s) were rewritten while they "

@@ -681,6 +681,56 @@ class TestMirror(Base):
         self.assertEqual(man.mirror_files("out")[0]["sha256"],
                          file_sha256(self.root / "out/a.csv"))
 
+    def test_a_known_file_rewritten_mid_upload_is_dropped_not_stale(self):
+        # The PUT landed, so the object holds bytes this push cannot name:
+        # not the digest it hashed (the file moved under it) and not the one
+        # the bucket had before. Listing either names a digest the bucket
+        # does not hold, and every reader's pull then fails verification.
+        self.write("out/x.csv", "v1")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())              # v1 published
+        v1 = man.mirror_files("out")[0]["sha256"]
+
+        self.write("out/x.csv", "v2")
+        real_upload = remote.upload
+
+        def racing_upload(src, key, content_type):
+            real_upload(src, key, content_type)         # the PUT lands: v2
+            self.write("out/x.csv", "v3")               # the build carries on
+
+        remote.upload = racing_upload
+        with self.assertRaises(SystemExit):
+            kinds.mirror_push(ctx, self.art())
+
+        self.assertEqual(man.mirror_files("out"), [])
+        self.assertNotEqual(v1, __import__("hashlib").sha256(
+            remote.objects["out/x.csv"]).hexdigest())
+
+        # The next quiet push republishes it, and a reader can pull again.
+        remote.upload = real_upload
+        self.assertTrue(kinds.mirror_push(ctx, self.art()))
+        self.assertEqual(man.mirror_files("out")[0]["sha256"],
+                         file_sha256(self.root / "out/x.csv"))
+
+    def test_an_interrupt_between_the_put_and_the_recheck_drops_the_file(self):
+        # Same hole, reached by ^C in the post-upload re-hash of a large file
+        # rather than by a racing writer: the upload returned, so the object
+        # moved, and nothing added it to the verified set.
+        self.write("out/x.csv", "v1")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        self.write("out/x.csv", "v2")
+
+        def interrupted(path, e):
+            raise KeyboardInterrupt("^C during the post-upload re-hash")
+
+        with unittest.mock.patch.object(kinds, "_unchanged", interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                kinds.mirror_push(ctx, self.art())
+        self.assertEqual(man.mirror_files("out"), [])
+
     def test_status_reports_missing_stale_and_extra(self):
         self.write("out/a.csv", "hello")
         remote, man = Fake(), Manifest({})
