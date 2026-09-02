@@ -16,10 +16,16 @@
 #   make reproduce  the whole thing, from an empty checkout
 #   make clean      remove derived files
 #
-# The one rule underneath them all: **the pipeline writes out/, and the
-# documents only read it.** That is what lets `freeze: false` be the setting
-# everywhere — a rendered report can never be quoting a stale number, because
-# it has no cache to quote from and does no arithmetic of its own.
+# The one rule underneath them all: **all the computing happens in the analysis
+# modules, and no document does arithmetic.** That is what lets `freeze: false`
+# be the setting everywhere — a rendered report has no cache to quote from, so
+# it cannot be carrying a stale number.
+#
+# How a document reaches a number is the repository's own choice, and they
+# differ: some read the artifacts in out/, others call the modules and format
+# what comes back. The second recomputes from the inputs on every render, which
+# is the stronger of the two — there is no stored artifact for a stale number
+# to live in. This file does not assume either one.
 #
 # A repository's own Makefile sets a few variables, includes this, and defines
 # `build` and `check`. Everything else is here.
