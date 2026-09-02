@@ -118,6 +118,31 @@ def _rel(raw, name: str, field: str) -> Path:
         raise SystemExit(str(e)) from None
 
 
+def _include(raw, name: str) -> tuple[str, ...]:
+    """`include = [".csv", ".json"]` — file suffixes, dots and all.
+
+    Unvalidated this was whatever TOML supplied, wrapped in `tuple`. So
+    `include = ".csv"` became the tuple of its four characters, `["csv"]` a
+    suffix no file has, and `include = 5` a traceback. The first two match
+    nothing, which is not an error anywhere downstream: the local index comes
+    back empty, and the next push reports every file as gone and writes an
+    empty entry. A typo that unpublishes an artifact should not be a quiet
+    one, so the shape is checked where it is read.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise SystemExit(f"artifact {name!r}: include must be a list of file "
+                         f'suffixes, e.g. [".csv", ".json"], not {raw!r}')
+    bad = [x for x in raw if not x.startswith(".") or x == "." or "/" in x]
+    if bad:
+        raise SystemExit(f"artifact {name!r}: include holds file suffixes, "
+                         f'written with their dot like ".csv" — '
+                         f"{', '.join(repr(b) for b in bad)} "
+                         f"{'are' if len(bad) > 1 else 'is'} not one")
+    return tuple(raw)
+
+
 def _check_layout(arts: list[Artifact]) -> None:
     """No artifact may contain another, and no two archives may share a key.
 
@@ -177,7 +202,7 @@ def load(root: Path | None = None) -> Config:
             what=spec.get("what", ""),
             key=spec.get("key", ""),
             url=spec.get("url", ""),
-            include=tuple(spec.get("include", ())),
+            include=_include(spec.get("include"), name),
             manual=bool(spec.get("manual", False)),
         ))
 

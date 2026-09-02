@@ -139,6 +139,27 @@ class TestConfig(Base):
         with self.assertRaises(SystemExit):
             self.cfg.select(["nope"])
 
+    def test_include_must_be_a_list_of_dotted_suffixes(self):
+        # Unvalidated, `include = ".csv"` was the tuple of its characters and
+        # `["csv"]` a suffix no file has. Either matches nothing, the local
+        # index comes back empty, and the next push drops every published
+        # file from the manifest.
+        for bad in ('".csv"', '["csv"]', '5', '[".csv", "json"]',
+                    '[".csv", 3]', '["."]'):
+            with self.assertRaises(SystemExit, msg=bad) as e:
+                self.reload(SYNC_TOML.replace('include = [".csv", ".json"]',
+                                              f"include = {bad}"))
+            self.assertIn("include", str(e.exception))
+
+    def test_an_empty_include_still_means_every_file(self):
+        cfg = self.reload(SYNC_TOML.replace('include = [".csv", ".json"]',
+                                            "include = []"))
+        art = {a.name: a for a in cfg.artifacts}["out"]
+        self.assertEqual(art.include, ())
+        self.write("out/anything.txt", "x")
+        self.assertEqual([p.name for p in kinds._walk(self.root, art)],
+                         ["anything.txt"])
+
     def test_manual_artifacts_are_skipped_by_a_bare_select(self):
         cfg = self.reload(
             SYNC_TOML +
