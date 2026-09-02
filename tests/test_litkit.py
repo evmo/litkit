@@ -1220,7 +1220,7 @@ class TestArchive(Base):
         for verb in (kinds.archive_status, kinds.archive_pull):
             with self.assertRaises(SystemExit) as e:
                 verb(ctx, self.art())
-            self.assertIn("declares this a archive", str(e.exception))
+            self.assertIn("declares this an archive", str(e.exception))
 
         # …and push is the way back: it replaces the entry rather than
         # refusing, so the bucket never becomes unwritable.

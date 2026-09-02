@@ -93,6 +93,10 @@ def _dest(ctx, art, rel: str) -> Path:
         raise SystemExit(f"  {e}") from None
 
 
+def _a(kind) -> str:
+    return f"an {kind}" if str(kind)[:1] in "aeiou" else f"a {kind}"
+
+
 def _entry(ctx, art) -> dict | None:
     """The manifest entry for this artifact, if this kind can read it.
 
@@ -108,11 +112,12 @@ def _entry(ctx, art) -> dict | None:
     """
     e = ctx.manifest.get(art.name)
     if e and e.get("kind") != art.kind:
+        mine, theirs = _a(art.kind), _a(e.get("kind"))
         raise SystemExit(
-            f"  {art.name}: sync.toml declares this a {art.kind}, but the "
-            f"manifest in the bucket describes a {e.get('kind')} — there is "
-            f"nothing here to compare it with.\n"
-            f"    `litkit push {art.name}` republishes it as a {art.kind}.")
+            f"  {art.name}: sync.toml declares this {mine}, but the manifest "
+            f"in the bucket describes {theirs} — there is nothing here to "
+            f"compare it with.\n"
+            f"    `litkit push {art.name}` republishes it as {mine}.")
     return e
 
 
@@ -122,7 +127,7 @@ def _prior(ctx, art) -> dict:
     e = ctx.manifest.get(art.name) or {}
     if e and e.get("kind") != art.kind:
         print(f"  {art.name:9} replacing the manifest's {e.get('kind')} entry "
-              f"— sync.toml declares this a {art.kind}")
+              f"— sync.toml declares this {_a(art.kind)}")
         return {}
     return e
 
