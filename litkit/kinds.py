@@ -225,7 +225,11 @@ def _layout_lines(conflicts: list[tuple[Path, str]], root: Path) -> list[str]:
         except ValueError:
             shown = str(p)
         seen.setdefault(shown, why)
-    return [f"    {k} is {v}" for k, v in seen.items()]
+    # These are staged-tree and local names, not manifest ones — nothing
+    # refused a control character in them on the way in. `paths.relative`
+    # guards everything the bucket *names*; a bundle's member names it never
+    # sees, and a refusal is the message most worth forging.
+    return [f"    {paths.display(k)} is {v}" for k, v in seen.items()]
 
 
 def _refuse_layout(art, conflicts: list[tuple[Path, str]], root: Path,
@@ -512,7 +516,8 @@ def archive_pull(ctx, art, *, force=False, clean=False) -> None:
                 f"  {art.name}: the bundle is not the tree the manifest "
                 f"describes — {art.path} was not touched\n"
                 + (f"    it also holds {len(stray):,} file(s) outside "
-                   f"{art.path}, e.g. {stray[0]}\n" if stray else "")
+                   f"{art.path}, e.g. {paths.display(stray[0])}\n"
+                   if stray else "")
                 + f"    expected {remote['tree_hash']}\n"
                   f"    got      {after}")
 

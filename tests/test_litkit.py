@@ -262,6 +262,26 @@ class TestPaths(Base):
             with self.subTest(bad), self.assertRaises(paths.Unsafe):
                 paths.relative(bad)
 
+    def test_relative_rejects_control_characters(self):
+        """A bucket name is printed back on every pull, so ESC and CR are as
+        much a part of what the terminal does with it as the letters are."""
+        for raw in ("out/\x1b[32mverified\x1b[0m.csv",     # colour
+                    "out/\x1b[2K\rup to date.csv",          # erase and repaint
+                    "out/a\nb.csv", "out/a\rb.csv", "out/a\x07b.csv",
+                    "out/a\tb.csv", "out/a\x7fb.csv", "out/a\x9bb.csv"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(paths.Unsafe) as e:
+                    paths.relative(raw)
+                self.assertIn("control character", str(e.exception))
+        # …and the refusal itself does not print the bytes it is refusing.
+        with self.assertRaises(paths.Unsafe) as e:
+            paths.relative("out/\x1b[2K\rgotcha.csv")
+        self.assertNotIn("\x1b", str(e.exception))
+
+    def test_display_escapes_a_name_relative_never_saw(self):
+        self.assertEqual(paths.display("a\x1b[2K\rb"), "a\\x1b[2K\\x0db")
+        self.assertEqual(paths.display("out/ordinary.csv"), "out/ordinary.csv")
+
     def test_relative_accepts_an_ordinary_name(self):
         self.assertEqual(paths.relative("out/sub/a.csv").as_posix(),
                          "out/sub/a.csv")
@@ -519,6 +539,15 @@ class TestManifestValidation(Base):
     def test_duplicate_entries_are_refused(self):
         e = {"path": "out/a.csv", "size": 1, "sha256": H1}
         self.assertIn("listed twice", self.bad(self.mirror(e, dict(e))))
+
+    def test_a_path_carrying_terminal_escapes_is_refused(self):
+        # Display-only, but the display is how an operator learns whether the
+        # pull worked: `\x1b[2K\r` erases litkit's own line and repaints it.
+        msg = self.bad(self.mirror(
+            {"path": "out/\x1b[2K\rup to date  verified.csv",
+             "size": 1, "sha256": H1}))
+        self.assertIn("control character", msg)
+        self.assertNotIn("\x1b", msg)
 
     def test_a_digest_that_is_not_a_digest_is_refused(self):
         self.bad(self.mirror({"path": "out/a.csv", "size": 1, "sha256": "aa"}))
@@ -1120,7 +1149,7 @@ class TestArchive(Base):
         kinds.archive_pull(ctx, self.art())
         self.assertEqual(tree_hash(self.root / "data/cache"), before)
 
-    def _bundle_with_a_stray(self, remote):
+    def _bundle_with_a_stray(self, remote, name="evil.txt"):
         """Repack the published bundle with one extra file beside the
         artifact, and correct the manifest's archive digest to match.
 
@@ -1138,7 +1167,7 @@ class TestArchive(Base):
                         for m in src:
                             out.addfile(m, src.extractfile(m)
                                         if m.isreg() else None)
-                info = tarfile.TarInfo("evil.txt")
+                info = tarfile.TarInfo(name)
                 info.size = 4
                 out.addfile(info, io.BytesIO(b"boo\n"))
         remote.objects[key] = buf.getvalue()
@@ -1146,6 +1175,30 @@ class TestArchive(Base):
         entry["archive_sha256"] = hashlib.sha256(buf.getvalue()).hexdigest()
         entry["archive_bytes"] = len(buf.getvalue())
         self.man_for_stray.set("cache", entry)
+
+    def test_a_strays_name_is_escaped_before_it_reaches_the_terminal(self):
+        """The one name on the pull path `paths.relative` never sees.
+
+        Manifest paths are refused for a control character on the way in;
+        a bundle's *member* names are not — the tar is opened, walked and
+        the stray reported. That report is the message worth forging, since
+        it is how the operator learns the pull was refused.
+        """
+        self.write("data/cache/1.json", '{"n": 1}')
+        remote, man = Fake(), Manifest({})
+        self.man_for_stray = man
+        ctx = Ctx(self.cfg, remote, man)
+        kinds.archive_push(ctx, self.art())
+        self._bundle_with_a_stray(remote, name="\x1b[2Kverified\r.txt")
+        before = tree_hash(self.root / "data/cache")
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.archive_pull(ctx, self.art(), force=True)
+        msg = str(e.exception)
+        self.assertIn("file(s) outside", msg)
+        self.assertNotIn("\x1b", msg)
+        self.assertIn("\\x1b[2Kverified\\x0d.txt", msg)
+        self.assertEqual(tree_hash(self.root / "data/cache"), before)
 
     def test_a_bundle_holding_a_file_outside_the_artifact_is_refused(self):
         # The stray walk skips the artifact's own subtree, which cannot hold
