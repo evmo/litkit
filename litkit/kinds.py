@@ -458,22 +458,54 @@ def archive_push(ctx, art, *, force=False, dry_run=False) -> bool:
 # reader can fetch one file without the rest, and a re-publish after a partial
 # re-run uploads only what actually moved.
 
+def _covers(art, rel: str) -> bool:
+    """Is `rel` a path this artifact's own rules cover?
+
+    One test, asked of both sides. The local index has always applied it; the
+    manifest's list did not, and a filter applied to one side only is a pull
+    and a status that can never agree — every pull downloads a file the local
+    index will not look at, and every status calls it missing again.
+    """
+    p = PurePosixPath(rel)
+    inside = p.parts[len(art.path.parts):]
+    if not inside:
+        return True                     # the artifact is that one file
+    if p.name.endswith(".part") or SKIP_DIRS & set(inside):
+        return False
+    return not art.include or p.suffix in art.include
+
+
 def _walk(root: Path, art) -> list[Path]:
     base = root / art.path
     if base.is_file():
         return [base]
     if not base.exists():
         return []
-    out = []
-    for p in sorted(base.rglob("*")):
-        if not p.is_file() or p.name.endswith(".part"):
-            continue
-        if SKIP_DIRS & set(p.relative_to(base).parts):
-            continue
-        if art.include and p.suffix not in art.include:
-            continue
-        out.append(p)
-    return out
+    return [p for p in sorted(base.rglob("*"))
+            if p.is_file() and _covers(art, p.relative_to(root).as_posix())]
+
+
+def _remote_index(ctx, art) -> list[dict]:
+    """The manifest's files for this artifact, less the ones it does not cover.
+
+    A bucket can hold entries outside the filter — a legacy flat list, which
+    the manifest reader takes transparently, or an `include` narrowed since
+    the last push. They belong to nothing this repository publishes, so pull
+    and status leave them where they are.
+
+    A path that is not a well-formed relative path is not filtered but kept,
+    so that `_dest` refuses it by name. Quietly dropping it instead would turn
+    a manifest nobody should act on into one that looks merely small.
+    """
+    def judgeable(rel) -> bool:
+        try:
+            paths.relative(rel)
+        except paths.Unsafe:
+            return False
+        return True
+
+    return [e for e in ctx.manifest.mirror_files(art.name)
+            if not judgeable(e.get("path")) or _covers(art, e["path"])]
 
 
 def _local_index(ctx, art) -> tuple[dict[str, dict], int]:
@@ -522,7 +554,7 @@ def _classify(local: dict, remote: list[dict]) -> tuple[list, list, list]:
 
 def mirror_status(ctx, art) -> Report:
     local, total = _local_index(ctx, art)
-    remote = ctx.manifest.mirror_files(art.name)
+    remote = _remote_index(ctx, art)
     local_s = f"{len(local):,} files, {human(total)}" if local else "absent"
     remote_s = (f"{len(remote):,} files, "
                 f"{human(sum(e['size'] for e in remote))}" if remote else "absent")
@@ -541,9 +573,11 @@ def mirror_status(ctx, art) -> Report:
 
 
 def mirror_pull(ctx, art, *, force=False, clean=False, workers=8) -> None:
-    remote = ctx.manifest.mirror_files(art.name)
+    remote = _remote_index(ctx, art)
     if not remote:
-        print(f"  {art.name:9} not in the bucket")
+        listed = ctx.manifest.mirror_files(art.name)
+        print(f"  {art.name:9} nothing in the bucket is covered by `include`"
+              if listed else f"  {art.name:9} not in the bucket")
         return
     local, _ = _local_index(ctx, art)
     missing, stale, extra = _classify(local, remote)
@@ -658,12 +692,21 @@ def mirror_push(ctx, art, *, force=False, dry_run=False) -> bool:
     todo = [e for e in local.values()
             if force or known.get(e["path"], {}).get("sha256") != e["sha256"]]
     gone = sorted(known.keys() - local.keys())
+    # Two different things, and saying "no longer here" about a file that is
+    # sitting right there sends someone looking for a deletion that did not
+    # happen. A path the artifact does not cover was never in the local index.
+    deleted = [rel for rel in gone if _covers(art, rel)]
+    uncovered = [rel for rel in gone if not _covers(art, rel)]
 
     print(f"  {art.name:9} {len(local):,} files, {human(total)} — "
           f"{len(todo):,} changed, {len(local) - len(todo):,} already current")
-    if gone:
-        print(f"  {art.name:9} {len(gone):,} no longer here — dropping from the "
-              f"manifest (the objects stay in the bucket)")
+    if deleted:
+        print(f"  {art.name:9} {len(deleted):,} no longer here — dropping from "
+              f"the manifest (the objects stay in the bucket)")
+    if uncovered:
+        print(f"  {art.name:9} {len(uncovered):,} no longer covered by "
+              f"`include` — dropping from the manifest (the objects stay in "
+              f"the bucket)")
     if dry_run:
         for e in todo[:20]:
             print(f"    {e['size']:>12,}  {e['path']}")

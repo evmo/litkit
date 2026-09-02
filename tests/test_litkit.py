@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import http.client
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -586,6 +588,48 @@ class TestMirror(Base):
         self.assertIn("nothing under out was changed", str(e.exception))
         self.assertEqual((self.root / "out/a.csv").read_text(), "good")
         self.assertEqual((self.root / "out/b.csv").read_text(), "also good")
+
+    def test_pull_and_status_ignore_what_include_does_not_cover(self):
+        # A legacy flat list, which the manifest reader takes transparently,
+        # can name a file this artifact's `include` excludes. The local index
+        # never sees it, so before this every pull downloaded it again and
+        # every status called it missing again.
+        body = b"<h1>report</h1>"
+        remote, man = Fake(), Manifest({})
+        remote.objects["out/a.csv"] = b"A"
+        remote.objects["out/report.html"] = body
+        remote.objects["manifest.json"] = json.dumps({"files": [
+            {"path": "out/a.csv", "size": 1,
+             "sha256": hashlib.sha256(b"A").hexdigest()},
+            {"path": "out/report.html", "size": len(body),
+             "sha256": hashlib.sha256(body).hexdigest()},
+        ]}).encode()
+        remote._stamp("manifest.json")
+
+        man = Manifest.load(remote, self.cfg)
+        self.assertEqual(len(man.mirror_files("out")), 2)   # both migrated
+        ctx = self.ctx(man, remote)
+
+        kinds.mirror_pull(ctx, self.art())
+        self.assertTrue((self.root / "out/a.csv").exists())
+        self.assertFalse((self.root / "out/report.html").exists())
+        self.assertEqual(kinds.mirror_status(ctx, self.art()).verdict,
+                         "in sync")
+
+    def test_push_says_uncovered_rather_than_no_longer_here(self):
+        self.write("out/a.csv", "A")
+        self.write("out/notes.txt", "not covered by include")
+        remote, man = Fake(), Manifest({})
+        man.artifacts["out"] = {
+            "kind": "mirror", "path": "out",
+            "files": [{"path": "out/notes.txt", "size": 1, "sha256": H1}]}
+        ctx = self.ctx(man, remote)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kinds.mirror_push(ctx, self.art())
+        self.assertIn("no longer covered by `include`", out.getvalue())
+        self.assertNotIn("no longer here", out.getvalue())
 
     def test_pull_refuses_a_manifest_path_outside_the_artifact(self):
         remote, man = Fake(), Manifest({})
