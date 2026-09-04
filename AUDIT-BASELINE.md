@@ -34,6 +34,14 @@ true, delete it.
   Any advisory it returns belongs there, not to this repository. Accepted
   2026-09-04.
 
+- **`litmo/manifest.py:234` — `Manifest.mirror_files` is intentionally
+  test-facing.** Reported by audit-deadcode on 2026-09-04 as a method with no
+  production caller. It has none, and that is fine: `git grep -w mirror_files
+  -- litmo/` returns the definition alone, while `tests/test_litmo.py` calls
+  it 27 times to read back persisted and migrated mirror entries. Tests are
+  callers, and this is a public method of the published package. Suite 189
+  passed. Accepted 2026-09-04.
+
 ## Real, and deliberately not changed
 
 - **`litmo/paths.py` — `relative` accepts Unicode bidi overrides, and that

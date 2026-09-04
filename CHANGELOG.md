@@ -140,6 +140,14 @@ tolerated are now refused, and two commands exit differently.
 - An artifact directory that is a symlink is followed, not refused — but the
   bucket's names still cannot wander out of wherever it points.
 
+### Removed
+
+- **`litmo.mk_path()`.** An undocumented top-level callable returning the
+  packaged `common.mk` by path, unused since it was written: nothing in the
+  package called it — `litmo mk` reads the file itself — and no consumer
+  imported it. The supported way to get that file is still `litmo mk`, which
+  writes it to stdout, and that is how every repository vendors it.
+
 ## 0.1.0
 
 First release: `archive`, `mirror` and `fetch` artifact kinds, the shared

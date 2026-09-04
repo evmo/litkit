@@ -13,9 +13,3 @@ from wanting that to be checkable.
 """
 
 __version__ = "0.1.0"
-
-
-def mk_path() -> str:
-    """Filesystem path of the packaged common.mk."""
-    from pathlib import Path
-    return str(Path(__file__).parent / "data" / "common.mk")
