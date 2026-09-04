@@ -27,11 +27,17 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+# Upper-bounded on purpose. This checkout's lock protects only this checkout;
+# a consumer's first resolution reads these ranges, and both packages reach
+# substantive APIs (client/get_object/download_file/upload_file/put_object,
+# ZstdCompressor/stream_writer/ZstdDecompressor/stream_reader), so an
+# incompatible major would break publishing or archive handling outright.
+# Widen a bound after the new major has been through the suite.
 # Writing to the bucket, and reading from a private one.
-s3 = ["boto3>=1.34"]
+s3 = ["boto3>=1.34,<2"]
 # The `archive` kind — tar.zst bundles for trees of many small files.
-archive = ["zstandard>=0.22"]
-all = ["boto3>=1.34", "zstandard>=0.22"]
+archive = ["zstandard>=0.22,<1"]
+all = ["boto3>=1.34,<2", "zstandard>=0.22,<1"]
 
 [project.urls]
 Homepage = "https://github.com/evmo/litkit"
@@ -43,7 +49,11 @@ Changelog = "https://github.com/evmo/litkit/blob/main/CHANGELOG.md"
 litkit = "litkit.cli:main"
 
 [build-system]
-requires = ["hatchling"]
+# Pinned exactly: an unconstrained `requires` resolves whatever Hatchling is
+# newest at build time, in an isolated environment `uv.lock` never sees, so
+# the backend could change what the wheel contains with no edit here. Bump
+# this deliberately and check the wheel still carries common.mk and py.typed.
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

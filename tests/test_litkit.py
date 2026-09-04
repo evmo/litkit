@@ -857,8 +857,17 @@ class TestMirror(Base):
             self.write(f"out/f{i}.csv", f"v2-{i}")
         real_upload = remote.upload
         lock = threading.Lock()
+        # Every worker has to be past the queue before the failure propagates.
+        # `mirror_push` shuts its pool down with `cancel_futures=True`, so a
+        # thread the scheduler has not got to yet is cancelled rather than
+        # uploaded — right for a job still queued, but it would make the count
+        # below a race on how fast the main thread reaches the failure. The
+        # barrier makes "in flight" mean it; the timeout turns a pool narrower
+        # than six into a failure rather than a hang.
+        in_flight = threading.Barrier(6, timeout=10)
 
         def upload(src, key, content_type):
+            in_flight.wait()
             if key.endswith("f0.csv"):
                 raise OSError("connection reset")   # fails first, at once
             time.sleep(0.05)                        # the rest are still going

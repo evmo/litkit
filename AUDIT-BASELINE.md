@@ -26,6 +26,14 @@ true, delete it.
   the `case` pattern against a quoted `p` in isolation is what makes this look
   real; it is not how the recipe runs. Accepted 2026-09-02.
 
+- **`npm audit` from the litkit root is out of scope.**
+  Noted by audit-deps on 2026-09-04. litkit tracks no `package.json`, npm
+  lockfile or JavaScript source at all. Verified here: `npm prefix` resolves
+  upward to `/home/evmo` and `npm root` to `/home/evmo/node_modules`, so an
+  `npm audit` run from this checkout reports on a separate parent project.
+  Any advisory it returns belongs there, not to this repository. Accepted
+  2026-09-04.
+
 ## Real, and deliberately not changed
 
 - **`litkit/paths.py` — `relative` accepts Unicode bidi overrides, and that
