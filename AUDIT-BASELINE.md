@@ -116,6 +116,23 @@ true, delete it.
   pre-push digest, the pre-pull compare — and explicitly refused at
   `kinds.py:421`, is worth writing. Accepted 2026-09-02.
 
+  The *other* fix for the same sentence — hash the files in a pool rather
+  than cache their digests — was weighed on 2026-09-04, when the mirror kind
+  got exactly that (`_local_index` and the staged verification pass, both
+  eight wide). It does not carry the trust-model objection above at all: it
+  reads every byte, every time, and answers identically. It is declined on
+  scale alone. Re-measured that day against the real archive consumer,
+  owphack, best of three: `data/cache` 3,181 files / 65 MB in **0.106 s**,
+  `out` 10 files / 21 MB in 0.013 s, and `data/owp.sqlite` — one 97 MB file,
+  which no width can split — in 0.054 s. The largest is 5x under the 0.5 s
+  this repo calls noticeable, and unlike the mirror kind the cost is not on
+  the no-op path of a 2 GB tree.
+
+  What would change *that*: an archive artifact of a few thousand files past
+  roughly 1 GB, where `tree_hash` alone crosses half a second. The change is
+  then small and safe — hash the sorted list in a pool, fold the digests into
+  the running sha256 in that same sorted order, since the order is the hash.
+
 - **`litmo/kinds.py:285` — `_install`'s merge loop is not worth restructuring,
   and the reason the audit gave for it is wrong.**
   audit-perf on 2026-09-02 raised this inside its "pull walks and hashes more

@@ -137,6 +137,18 @@ tolerated are now refused, and two commands exit differently.
   and refuses a `CLEAN_EXTRA` that is absolute or contains `..`. Repositories
   vendoring it should run `make mk-update`.
 - `--workers` must be at least 1; 0 used to fail inside the thread pool.
+- **Mirror commands read the local tree in parallel.** Two full passes over
+  every covered file used to run one file after another, either side of a
+  download that had been eight wide all along: the local index every `status`,
+  `pull` and `push` builds before it can say that nothing moved, and the
+  staged verification a `pull` does before it may touch the working tree.
+  Both now run `--workers` wide. On the largest real mirror published from
+  here — 711 files, 2.18 GB — the no-op comparison goes from 1.30 s to 0.28 s
+  warm and 3.09 s to 0.84 s cold, and the verification pass from 2.25 s to
+  0.55 s warm and 3.26 s to 0.96 s cold; a full 840-file, 2.28 GB pull over
+  HTTPS is 5.07 s against 4.05 s. Both answers are unchanged: the index is the
+  same file for file and in the same order, and a failed verification still
+  names every bad file, in manifest order.
 - An artifact directory that is a symlink is followed, not refused — but the
   bucket's names still cannot wander out of wherever it points.
 

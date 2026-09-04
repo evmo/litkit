@@ -273,7 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--clean", action="store_true",
                    help="remove local files the bucket does not have")
     p.add_argument("-w", "--workers", type=_positive, default=8,
-                   help="parallel downloads for the `mirror` kind")
+                   help="parallel downloads and local hashing "
+                        "for the `mirror` kind")
     p.set_defaults(func=cmd_pull)
 
     p = with_names(sub.add_parser("push", help="here -> bucket"))
@@ -282,7 +283,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true",
                    help="report what would move, upload nothing")
     p.add_argument("-w", "--workers", type=_positive, default=8,
-                   help="parallel uploads for the `mirror` kind")
+                   help="parallel uploads and local hashing "
+                        "for the `mirror` kind")
     p.set_defaults(func=cmd_push)
 
     p = with_names(sub.add_parser(

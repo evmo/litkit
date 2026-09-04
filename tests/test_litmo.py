@@ -610,6 +610,55 @@ class TestMirror(Base):
         got = {p.name for p in kinds._walk(self.root, self.art())}
         self.assertEqual(got, {"keep.csv", "keep2.json"})
 
+    def test_the_local_index_pairs_every_digest_with_its_own_file(self):
+        # The index is built by a pool now, so the two things that can break
+        # silently are the pairing — a digest attached to the wrong path
+        # publishes a manifest every reader fails to verify — and the order,
+        # which is what `_classify` hands to the `--clean` sweep and what
+        # `mirror_push` uploads in. Sizes descend as the names ascend, so a
+        # loop that collected results as they completed would come back
+        # roughly reversed.
+        want = {}
+        for i in range(24):
+            rel = f"out/d{i % 3}/f{i:02d}.csv"
+            body = f"file {i} " + "x" * (2000 - 60 * i)
+            self.write(rel, body)
+            want[rel] = (len(body.encode()),
+                         hashlib.sha256(body.encode()).hexdigest())
+
+        art = self.art()
+        walked = [p.relative_to(self.root).as_posix()
+                  for p in kinds._walk(self.root, art)]
+        idx, total = kinds._local_index(self.ctx(), art)
+
+        self.assertEqual(list(idx), walked)
+        self.assertEqual({rel: (e["size"], e["sha256"])
+                          for rel, e in idx.items()}, want)
+        self.assertEqual(total, sum(size for size, _ in want.values()))
+        # Width is a performance knob and nothing else: one worker and eight
+        # must return the same index in the same order.
+        one, one_total = kinds._local_index(self.ctx(), art, workers=1)
+        self.assertEqual(one, idx)
+        self.assertEqual(list(one), list(idx))
+        self.assertEqual(one_total, total)
+
+    def test_an_unpublishable_name_is_refused_before_a_byte_is_read(self):
+        # A control character is a legal POSIX filename and an illegal
+        # manifest path. Every name is checked before the pool starts, so the
+        # refusal is the same one whichever worker would have reached the
+        # file first.
+        self.write("out/fine.csv", "a")
+        self.write("out/weird.csv", "b")
+
+        def never(path):
+            raise AssertionError(f"hashed {path} before checking the names")
+
+        with unittest.mock.patch.object(kinds, "file_sha256", never):
+            with self.assertRaises(SystemExit) as e:
+                kinds._local_index(self.ctx(), self.art())
+        self.assertIn("control character", str(e.exception))
+        self.assertIn("before publishing", str(e.exception))
+
     def test_push_then_pull_round_trip(self):
         self.write("out/a.csv", "hello")
         self.write("out/b.json", "{}")
@@ -688,6 +737,35 @@ class TestMirror(Base):
         (self.root / "out/a.csv").unlink()
         with self.assertRaises(SystemExit):
             kinds.mirror_pull(ctx, self.art())
+
+    def test_verification_names_every_bad_file_in_manifest_order(self):
+        # The staged tree is verified by a pool now. Two things that would
+        # break quietly: stopping at the first failure, which turns "12 of 14
+        # failed" into "1 of 14" and hides how bad the bucket is, and losing
+        # the order, which makes the ten names it prints a different ten each
+        # run. Twelve of fourteen are tampered with, so the message has to
+        # elide as well.
+        want = {f"out/f{i:02d}.csv": f"body {i}".encode() for i in range(14)}
+        for rel, body in want.items():
+            self.write(rel, body.decode())
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+
+        shutil.rmtree(self.root / "out")
+        good = {"out/f03.csv", "out/f11.csv"}
+        for rel in want:
+            if rel not in good:
+                remote.objects[rel] = b"tampered " + rel.encode()
+
+        with self.assertRaises(SystemExit) as e:
+            kinds.mirror_pull(ctx, self.art())
+        msg = str(e.exception)
+        self.assertIn("12 of 14 file(s) failed verification", msg)
+        named = [ln.strip() for ln in msg.splitlines() if ln.startswith("    o")]
+        self.assertEqual(named, [r for r in sorted(want) if r not in good][:10])
+        self.assertIn("and 2 more", msg)
+        self.assertFalse((self.root / "out").exists())
 
     def test_a_failed_pull_leaves_the_local_copy_alone(self):
         self.write("out/a.csv", "good")
