@@ -21,6 +21,7 @@ import os
 import random
 import socket
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -178,9 +179,19 @@ class Remote:
     def download(self, key: str, dest: Path, max_bytes: int | None = None) -> None:
         """Fetch one object to `dest`, leaving nothing behind on failure.
 
-        `max_bytes` is enforced while streaming on the public path. Over the
-        S3 API boto3 owns the transfer, so the guard there is the size and
-        digest check the caller makes against the manifest afterwards.
+        `max_bytes` is enforced while the body streams, on both paths. The
+        public one counts in `_drain`. The S3 one used to enforce nothing at
+        all — boto3 owns the transfer, and the excuse was that the caller
+        checks size and digest against the manifest afterwards. It does, but
+        only once the whole object is on disk: an object far larger than the
+        manifest admits to filled staging before anything looked at it.
+
+        The transfer's own progress callback is the bound. s3transfer invokes
+        it as bytes land and rewinds a retried part with a *negative* delta,
+        so the running total is what has arrived rather than what has been
+        attempted — an object of exactly the promised size never trips, and a
+        dropped connection re-reading its part does not either. Raising from
+        it aborts the transfer part-way instead of after the fact.
         """
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".part")
@@ -190,13 +201,34 @@ class Remote:
                     tmp.open("wb") as fh:
                 _drain(r, fh, max_bytes)
 
+        seen, counted = 0, threading.Lock()
+
+        def landed(n: int) -> None:
+            """Called from s3transfer's worker threads, one part each."""
+            nonlocal seen
+            with counted:
+                seen += n
+                over = seen > max_bytes
+            if over:
+                raise Oversized(f"longer than the {max_bytes:,} bytes promised")
+
         try:
             if self.public:
                 # Each attempt reopens `tmp` for writing, so a retry starts
                 # from an empty file rather than appending to half of one.
                 _retrying(once, key)
             else:
-                self._s3.download_file(self._bucket, key, str(tmp))
+                # The same transfer settings the upload path uses: one
+                # bucket, one set of R2 quirks. Fewer parts in flight also
+                # tightens the cap above — measured against a 400 MB object
+                # promised 1 MB, the abort lands after 12-15 MB rather than
+                # the 19-30 MB boto3's 10-way default pulls first — and it
+                # keeps `download_many`'s 8 workers from each spawning ten
+                # more threads on any file over boto3's 8 MB threshold.
+                self._s3.download_file(
+                    self._bucket, key, str(tmp),
+                    Config=_creds.transfer_config(),
+                    **({} if max_bytes is None else {"Callback": landed}))
             os.replace(tmp, dest)
         except Oversized as e:
             with contextlib.suppress(OSError):

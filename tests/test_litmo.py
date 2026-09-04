@@ -26,6 +26,7 @@ import time
 import unittest
 import unittest.mock
 import urllib.error
+import warnings
 from pathlib import Path
 
 from litmo import cli, config, creds, kinds, paths
@@ -623,13 +624,21 @@ class TestMirror(Base):
         self.assertEqual((self.root / "out/a.csv").read_text(), "hello")
 
     def test_push_is_a_no_op_when_nothing_changed(self):
+        # The second call returning false only means something if the first
+        # one actually published: with `mirror_push` gutted to `return False`
+        # every assertion below the first used to still hold.
         self.write("out/a.csv", "hello")
         remote, man = Fake(), Manifest({})
         ctx = self.ctx(man, remote)
-        kinds.mirror_push(ctx, self.art())
+        self.assertTrue(kinds.mirror_push(ctx, self.art()))
+        self.assertEqual(set(remote.objects), {"out/a.csv"})
+        self.assertEqual(len(man.mirror_files("out")), 1)
+        uploads = remote.uploads
+
         man.dirty = False
         self.assertFalse(kinds.mirror_push(ctx, self.art()))
         self.assertFalse(man.dirty)
+        self.assertEqual(remote.uploads, uploads)
 
     def test_push_notices_a_deletion_even_with_nothing_to_upload(self):
         self.write("out/a.csv", "hello")
@@ -1047,6 +1056,53 @@ class TestMirror(Base):
         self.assertIn("extra", r.verdict)
         self.assertFalse(r.ok)
 
+    def empty_mirror(self):
+        """A bucket that has published this artifact and then emptied it."""
+        self.write("out/a.csv", "hello")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        (self.root / "out/a.csv").unlink()
+        kinds.mirror_push(ctx, self.art())
+        self.assertEqual(man.mirror_files("out"), [])
+        return ctx
+
+    def test_an_emptied_mirror_with_local_files_differs_not_local_only(self):
+        # "local only" says the bucket knows nothing about this artifact. It
+        # knows exactly what it holds — nothing — and `pull --clean` will act
+        # on that, so the reader has to be told they are extras.
+        ctx = self.empty_mirror()
+        self.write("out/a.csv", "stale")
+        r = kinds.mirror_status(ctx, self.art())
+        self.assertEqual(r.verdict, "DIFFERS (1 extra)")
+        self.assertEqual(r.remote, "0 files")
+        self.assertFalse(r.ok)
+
+    def test_an_emptied_mirror_with_nothing_local_is_in_sync(self):
+        ctx = self.empty_mirror()
+        r = kinds.mirror_status(ctx, self.art())
+        self.assertEqual(r.verdict, "in sync")
+        self.assertTrue(r.ok)
+
+    def test_an_unpublished_artifact_is_still_absent_or_local_only(self):
+        # The half the entry check must not disturb: with no manifest entry
+        # the bucket really has said nothing.
+        ctx = self.ctx(Manifest({}), Fake())
+        self.assertEqual(kinds.mirror_status(ctx, self.art()).verdict, "absent")
+        self.write("out/a.csv", "mine")
+        r = kinds.mirror_status(ctx, self.art())
+        self.assertEqual(r.verdict, "local only")
+        self.assertEqual(r.remote, "absent")
+
+    def test_a_published_mirror_with_nothing_local_is_remote_only(self):
+        self.write("out/a.csv", "hello")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        (self.root / "out/a.csv").unlink()
+        self.assertEqual(kinds.mirror_status(ctx, self.art()).verdict,
+                         "remote only")
+
     def test_pull_clean_removes_local_extras(self):
         self.write("out/a.csv", "hello")
         remote, man = Fake(), Manifest({})
@@ -1055,6 +1111,87 @@ class TestMirror(Base):
         self.write("out/extra.csv", "x")
         kinds.mirror_pull(ctx, self.art(), clean=True)
         self.assertFalse((self.root / "out/extra.csv").exists())
+
+    def test_pull_clean_applies_an_empty_published_mirror(self):
+        # Publishing the deletion of every file is a state, not an absence:
+        # `--clean` has to apply it, or a reader keeps files the publisher
+        # deliberately withdrew and `pull` still reports success.
+        self.write("out/a.csv", "hello")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        (self.root / "out/a.csv").unlink()
+        self.assertTrue(kinds.mirror_push(ctx, self.art()))
+        self.assertEqual(man.mirror_files("out"), [])
+
+        self.write("out/a.csv", "stale")
+        kinds.mirror_pull(ctx, self.art(), clean=True)
+        self.assertFalse((self.root / "out/a.csv").exists())
+
+    def test_pull_without_clean_keeps_files_an_empty_mirror_dropped(self):
+        self.write("out/a.csv", "hello")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        (self.root / "out/a.csv").unlink()
+        kinds.mirror_push(ctx, self.art())
+
+        self.write("out/a.csv", "stale")
+        kinds.mirror_pull(ctx, self.art())
+        self.assertEqual((self.root / "out/a.csv").read_text(), "stale")
+
+    def test_pull_clean_sweeps_nothing_for_an_artifact_the_manifest_omits(self):
+        # An empty mirror and an unpublished one look identical to
+        # `_remote_index`. Only the first is a claim about what the bucket
+        # holds; sweeping on the second would delete the only copy there is.
+        self.write("out/a.csv", "irreplaceable")
+        ctx = self.ctx(Manifest({}), Fake())
+        kinds.mirror_pull(ctx, self.art(), clean=True)
+        self.assertEqual((self.root / "out/a.csv").read_text(), "irreplaceable")
+
+    def test_pull_clean_sweeps_when_include_covers_nothing_published(self):
+        self.write("out/a.csv", "hello")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        self.assertEqual(len(man.mirror_files("out")), 1)
+
+        # `include` narrows to a suffix nothing published matches. The bucket
+        # still describes the artifact, so `--clean` still applies it.
+        self.cfg = self.reload(SYNC_TOML.replace('[".csv", ".json"]',
+                                                 '[".json"]'))
+        ctx = self.ctx(man, remote)
+        self.write("out/b.json", "{}")
+        kinds.mirror_pull(ctx, self.art(), clean=True)
+        self.assertFalse((self.root / "out/b.json").exists())
+        self.assertEqual((self.root / "out/a.csv").read_text(), "hello")
+
+    def test_the_up_to_date_count_is_what_the_sweep_left(self):
+        # The count was taken from the pre-sweep index, so a `--clean` pull
+        # that had just deleted a file still claimed to be holding it.
+        self.write("out/a.csv", "hello")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        self.write("out/extra.csv", "x")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kinds.mirror_pull(ctx, self.art(), clean=True)
+        self.assertIn("up to date  (1 files)", out.getvalue())
+        self.assertFalse((self.root / "out/extra.csv").exists())
+
+    def test_the_up_to_date_count_is_untouched_without_clean(self):
+        self.write("out/a.csv", "hello")
+        remote, man = Fake(), Manifest({})
+        ctx = self.ctx(man, remote)
+        kinds.mirror_push(ctx, self.art())
+        self.write("out/extra.csv", "x")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            kinds.mirror_pull(ctx, self.art())
+        self.assertIn("up to date  (2 files)", out.getvalue())
 
     def test_a_failed_clean_pull_deletes_no_local_extras(self):
         # --clean removes the only copy there is: artifact directories are
@@ -1361,12 +1498,36 @@ class TestArchive(Base):
         self.assertTrue((self.root / "data/cache/mine.json").exists())
         self.assertTrue((self.root / "data/cache/1.json").exists())
 
+    def test_packing_leans_on_nothing_deprecated(self):
+        # `_Tar.gettarinfo` deliberately drops the back-reference the stdlib
+        # plants on each member. 3.12 writes it and calls it "Not needed";
+        # 3.13 renamed it, made the old name warn, and marked it for removal
+        # in 3.16 — and the 3.12 floor has no slot for the new name, so the
+        # only spelling that works everywhere is not to set it at all.
+        for i in range(3):
+            self.write(f"data/cache/{i}.json", f'{{"n": {i}}}')
+        self.write("data/cache/sub/deep.json", "{}")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            self.assertTrue(kinds.archive_push(
+                Ctx(self.cfg, Fake(), Manifest({})), self.art()))
+
     def test_push_is_a_no_op_when_the_tree_is_unchanged(self):
+        # Same defect as the mirror's no-op test: with `archive_push` gutted
+        # to `return False` this passed without a bundle ever existing.
         self.write("data/cache/1.json", "{}")
         remote, man = Fake(), Manifest({})
         ctx = Ctx(self.cfg, remote, man)
-        kinds.archive_push(ctx, self.art())
+        self.assertTrue(kinds.archive_push(ctx, self.art()))
+        entry = dict(man.get("cache"))
+        self.assertIn(entry["key"], remote.objects)
+        uploads = remote.uploads
+
+        man.dirty = False
         self.assertFalse(kinds.archive_push(ctx, self.art()))
+        self.assertFalse(man.dirty)
+        self.assertEqual(remote.uploads, uploads)
+        self.assertEqual(man.get("cache"), entry)
 
     def test_pull_rejects_a_corrupt_bundle(self):
         self.write("data/cache/1.json", "{}")
@@ -1800,6 +1961,36 @@ class TestFetch(Base):
         self.assertEqual(kinds.fetch_status(self.ctx, self.art).verdict,
                          "in sync")
 
+    def test_a_new_etag_refetches_even_when_last_modified_holds(self):
+        # The pair that matters: the bytes changed and the ETag says so, but
+        # `Last-Modified` is one-second resolution and did not move. Treating
+        # the two validators as alternatives kept the stale copy forever.
+        kinds.fetch_pull(self.ctx, self.art)
+        self.headers = {"etag": "v2", "last_modified": "Mon, 01 Jan 2026"}
+        self.served = b"three,four\n"
+        self.assertEqual(kinds.fetch_status(self.ctx, self.art).verdict,
+                         "DIFFERS")
+        kinds.fetch_pull(self.ctx, self.art)
+        self.assertEqual(self.fetches, 2)
+        self.assertEqual((self.root / "data/positions.csv").read_bytes(),
+                         self.served)
+
+    def test_a_new_last_modified_refetches_even_when_the_etag_holds(self):
+        # The mirror image, for a server whose ETag is not derived from the
+        # bytes (a weak or per-node one).
+        kinds.fetch_pull(self.ctx, self.art)
+        self.headers = {"etag": "v1", "last_modified": "Tue, 02 Jan 2026"}
+        self.served = b"three,four\n"
+        kinds.fetch_pull(self.ctx, self.art)
+        self.assertEqual(self.fetches, 2)
+
+    def test_a_server_offering_no_shared_validator_refetches(self):
+        # Nothing to compare is not evidence of freshness.
+        kinds.fetch_pull(self.ctx, self.art)
+        self.headers = {}
+        kinds.fetch_pull(self.ctx, self.art)
+        self.assertEqual(self.fetches, 2)
+
     def test_a_new_etag_refetches(self):
         kinds.fetch_pull(self.ctx, self.art)
         self.headers = {"etag": "v2", "last_modified": "Tue, 02 Jan 2026"}
@@ -2093,6 +2284,105 @@ class StubS3:
         if not self.readable:
             raise OSError("the connection is still down")
         return {"Body": Response(self.stored), "ETag": '"e"'}
+
+
+class StubDownload:
+    """`download_file` the way s3transfer drives it.
+
+    Bytes are handed to `Callback` as they land, and a part that has to be
+    re-read rewinds what it already reported with a negative delta — the
+    property the byte cap leans on, so the stub has to have it too. The
+    destination only appears once the whole body is through, which is what
+    makes an unbounded transfer fill the disk before anything checks it.
+    """
+
+    CHUNK = 256 << 10
+
+    def __init__(self, body: bytes, retry_after: int | None = None):
+        self.body, self.retry_after, self.transferred = body, retry_after, 0
+        self.config = None
+
+    def download_file(self, Bucket, Key, Filename, Callback=None, **kw):
+        self.config = kw.get("Config")
+        buf, rewound = bytearray(), False
+        while len(buf) < len(self.body):
+            chunk = self.body[len(buf):len(buf) + self.CHUNK]
+            buf += chunk
+            self.transferred += len(chunk)
+            if Callback:
+                Callback(len(chunk))
+                if self.retry_after is not None and not rewound \
+                        and len(buf) >= self.retry_after:
+                    Callback(-len(buf))       # the part is re-read from zero
+                    buf, rewound = bytearray(), True
+        Path(Filename).write_bytes(self.body)
+
+
+class TestPrivateDownload(Base):
+    """The S3 read path, which used to enforce no byte cap whatsoever."""
+
+    def remote(self, stub):
+        with unittest.mock.patch.object(
+                transport._creds, "load",
+                lambda root, bucket: {"R2_BUCKET_NAME": "b"}), \
+                unittest.mock.patch.object(transport._creds, "client",
+                                           lambda c: stub):
+            return Remote(self.cfg, need_write=True)
+
+    def dest(self):
+        return self.root / "data/cache/bundle.tar.zst"
+
+    def test_an_object_longer_than_promised_never_reaches_the_disk(self):
+        stub = StubDownload(b"x" * (4 << 20))
+        dest = self.dest()
+        with self.assertRaises(Oversized) as e:
+            self.remote(stub).download("v1/bundle.tar.zst", dest, 10)
+        self.assertIn("10 bytes promised", str(e.exception))
+        self.assertFalse(dest.exists())
+        self.assertFalse(dest.with_suffix(dest.suffix + ".part").exists())
+        # Aborted part-way, not after the whole object was on disk.
+        self.assertLess(stub.transferred, len(stub.body))
+
+    def test_an_object_exactly_the_promised_size_is_not_refused(self):
+        # `archive_pull` promises `archive_size` to the byte, so an off-by-one
+        # here refuses every bundle there is.
+        body = b"y" * (1 << 20)
+        stub = StubDownload(body)
+        dest = self.dest()
+        self.remote(stub).download("v1/bundle.tar.zst", dest, len(body))
+        self.assertEqual(dest.read_bytes(), body)
+
+    def test_a_retried_part_does_not_count_its_bytes_twice(self):
+        # s3transfer reports a re-read part as a negative delta rather than
+        # starting the count again; without that a dropped connection would
+        # push an exactly-promised object over its own cap.
+        body = b"z" * (1 << 20)
+        stub = StubDownload(body, retry_after=512 << 10)
+        dest = self.dest()
+        self.remote(stub).download("v1/bundle.tar.zst", dest, len(body))
+        self.assertEqual(dest.read_bytes(), body)
+        self.assertGreater(stub.transferred, len(body))    # it really retried
+
+    def test_downloads_use_the_projects_transfer_settings(self):
+        # Reads went out on boto3's defaults while writes used the tuned
+        # config, against the same bucket. Ten-way concurrency also put more
+        # bytes in flight before the cap above could abort, and gave each of
+        # `download_many`'s eight workers ten more threads to spawn.
+        stub = StubDownload(b"q" * 1024)
+        self.remote(stub).download("v1/bundle.tar.zst", self.dest(), 1 << 20)
+        want = creds.transfer_config()
+        self.assertIsNotNone(stub.config)
+        self.assertEqual(
+            (stub.config.multipart_threshold, stub.config.multipart_chunksize,
+             stub.config.max_concurrency),
+            (want.multipart_threshold, want.multipart_chunksize,
+             want.max_concurrency))
+
+    def test_no_promised_size_downloads_without_a_callback(self):
+        stub = StubDownload(b"w" * 1024)
+        dest = self.dest()
+        self.remote(stub).download("v1/bundle.tar.zst", dest)
+        self.assertEqual(dest.read_bytes(), stub.body)
 
 
 class TestConditionalWrite(Base):

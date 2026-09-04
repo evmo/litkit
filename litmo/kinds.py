@@ -327,6 +327,13 @@ class _Tar(tarfile.TarFile):
     a bundle independent of the publisher's account names. The cases that
     need more than an `lstat` to describe — a hardlink, a device, a fifo —
     are rare enough in an artifact to hand back to the stdlib and pay for.
+
+    One line of the original is deliberately not copied: the back-reference
+    `gettarinfo` plants on each member. 3.12 writes `tarinfo.tarfile = self`
+    and calls it "Not needed" in the comment; 3.13 renamed it to `_tarfile`,
+    made `tarfile` a property that warns, and marked it for removal in 3.16.
+    Nothing in `tarfile` ever reads it back, so setting it bought a
+    `DeprecationWarning` per member and an `AttributeError` in 3.16.
     """
 
     def gettarinfo(self, name=None, arcname=None, fileobj=None):
@@ -345,7 +352,6 @@ class _Tar(tarfile.TarFile):
             return super().gettarinfo(name, arcname)
 
         info = self.tarinfo()
-        info.tarfile = self
         _, arc = os.path.splitdrive(name if arcname is None else arcname)
         info.name = arc.replace(os.sep, "/").lstrip("/")
         info.mode = st.st_mode
@@ -717,15 +723,23 @@ def _classify(local: dict, remote: list[dict]) -> tuple[list, list, list]:
 def mirror_status(ctx, art) -> Report:
     local, total = _local_index(ctx, art)
     remote = _remote_index(ctx, art)
+    # An entry holding no covered files is the bucket saying it has nothing
+    # here — a different fact from never having been pushed, and the one
+    # `pull --clean` acts on. `_remote_index` is empty for both, so keying the
+    # verdict off it called a withdrawn mirror "local only" and sent a reader
+    # looking for a bucket that was answering perfectly well. `archive_status`
+    # already reads the entry rather than a derived list, for the same reason.
+    published = _entry(ctx, art) is not None
     local_s = f"{len(local):,} files, {human(total)}" if local else "absent"
     remote_s = (f"{len(remote):,} files, "
-                f"{human(sum(e['size'] for e in remote))}" if remote else "absent")
-    if not remote and not local:
-        return Report(local_s, remote_s, ABSENT)
-    if not remote:
-        return Report(local_s, remote_s, LOCAL_ONLY)
+                f"{human(sum(e['size'] for e in remote))}" if remote else
+                "0 files" if published else "absent")
+    if not published:
+        return Report(local_s, remote_s, LOCAL_ONLY if local else ABSENT)
     if not local:
-        return Report(local_s, remote_s, REMOTE_ONLY)
+        # Nothing here, and nothing published either, is agreement — not the
+        # absence of anything to compare.
+        return Report(local_s, remote_s, IN_SYNC if not remote else REMOTE_ONLY)
     missing, stale, extra = _classify(local, remote)
     if not (missing or stale or extra):
         return Report(local_s, remote_s, IN_SYNC)
@@ -736,10 +750,12 @@ def mirror_status(ctx, art) -> Report:
 
 def mirror_pull(ctx, art, *, force=False, clean=False, workers=8) -> None:
     remote = _remote_index(ctx, art)
-    if not remote:
-        listed = ctx.manifest.mirror_files(art.name)
-        print(f"  {art.name:9} nothing in the bucket is covered by `include`"
-              if listed else f"  {art.name:9} not in the bucket")
+    entry = _entry(ctx, art)
+    if not remote and entry is None:
+        # The manifest has never described this artifact, so there is nothing
+        # here to bring the local tree into line with — not even emptiness.
+        # `--clean` in particular must not sweep on the strength of silence.
+        print(f"  {art.name:9} not in the bucket")
         return
     local, _ = _local_index(ctx, art)
     missing, stale, extra = _classify(local, remote)
@@ -760,10 +776,29 @@ def mirror_pull(ctx, art, *, force=False, clean=False, workers=8) -> None:
             with contextlib.suppress(FileNotFoundError):
                 (ctx.cfg.root / rel).unlink()
 
+    if not remote:
+        # The bucket describes this artifact and describes it as holding
+        # nothing — the publisher deleted its last covered file, or `include`
+        # no longer covers what was published. That is a state a reader can be
+        # brought into sync with, so `--clean` applies it rather than treating
+        # the artifact as absent; without `--clean` the local files stay put,
+        # exactly as any other local extra would.
+        why = ("nothing in the bucket is covered by `include`"
+               if entry.get("files") else "the bucket holds no files here")
+        if clean:
+            sweep()                    # prints a line per file it removes
+        elif extra:
+            why += f"  ({len(extra):,} kept — `pull --clean` removes them)"
+        print(f"  {art.name:9} {why}")
+        return
     if not want:
         if clean:
-            sweep()
-        print(f"  {art.name:9} up to date  ({len(local):,} files)")
+            sweep()                    # prints a line per file it removes
+        # What is left, not what was here when the comparison ran: `sweep`
+        # has just deleted the extras, and counting them as still present
+        # made a `--clean` pull report more files than it had left behind.
+        left = len(local) - len(extra) if clean else len(local)
+        print(f"  {art.name:9} up to date  ({left:,} files)")
         return
     print(f"  {art.name:9} downloading {len(want):,} of {len(remote):,} files"
           f"  ({human(sum(e['size'] for e in want))})", flush=True)
@@ -981,9 +1016,25 @@ def _intact(dest: Path, seen: dict) -> bool:
 
 
 def _fresh(now: dict, seen: dict) -> bool:
-    return bool((now.get("etag") and now["etag"] == seen.get("etag")) or
-                (now.get("last_modified") and
-                 now["last_modified"] == seen.get("last_modified")))
+    """Is the server still serving the bytes `seen` was recorded from?
+
+    Every validator both sides carry has to agree. An OR here — fresh if
+    *either* one matches — let a moved ETag lose to a `Last-Modified` that
+    had not moved, and that is the common shape rather than a corner: the
+    ETag is derived from the bytes, while `Last-Modified` is one-second
+    resolution at best and plenty of publishers rewrite an object without
+    advancing it. The pair (new etag, unchanged Last-Modified) then read as
+    "up to date" forever, so `pull` never re-fetched and `status` reported a
+    changed input as in sync.
+
+    A validator only one side has is skipped, not failed: nothing can be
+    concluded from comparing it. If that leaves nothing to compare, the file
+    is not fresh — re-fetching is the safe answer when the server offers no
+    way to tell.
+    """
+    agree = [now[k] == seen.get(k) for k in ("etag", "last_modified")
+             if now.get(k) and seen.get(k)]
+    return bool(agree) and all(agree)
 
 
 def fetch_status(ctx, art) -> Report:
