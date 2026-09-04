@@ -1,5 +1,5 @@
 [project]
-name = "litkit"
+name = "litmo"
 version = "0.1.0"
 description = "Shared plumbing for literate-analysis repositories: artifact sync and a common make interface"
 readme = "README.md"
@@ -40,13 +40,13 @@ archive = ["zstandard>=0.22,<1"]
 all = ["boto3>=1.34,<2", "zstandard>=0.22,<1"]
 
 [project.urls]
-Homepage = "https://github.com/evmo/litkit"
-Source = "https://github.com/evmo/litkit"
-Issues = "https://github.com/evmo/litkit/issues"
-Changelog = "https://github.com/evmo/litkit/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/evmo/litmo"
+Source = "https://github.com/evmo/litmo"
+Issues = "https://github.com/evmo/litmo/issues"
+Changelog = "https://github.com/evmo/litmo/blob/main/CHANGELOG.md"
 
 [project.scripts]
-litkit = "litkit.cli:main"
+litmo = "litmo.cli:main"
 
 [build-system]
 # Pinned exactly: an unconstrained `requires` resolves whatever Hatchling is
@@ -57,7 +57,7 @@ requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["litkit"]
+packages = ["litmo"]
 
 [dependency-groups]
 dev = ["ruff>=0.6"]

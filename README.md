@@ -1,4 +1,4 @@
-# litkit
+# litmo
 
 Shared plumbing for literate-analysis repositories, so that they answer to the
 same commands, keep their data in the same shape, and move it to and from
@@ -23,7 +23,7 @@ reports/     *.qmd sources; *.md tracked, *.html not
 scripts/     stage entry points        <pkg>/  importable library
 data/        inputs      — git-ignored, synced from a bucket
 out/         artifacts   — git-ignored, synced from a bucket
-.litkit/     litkit's own state and pull staging — git-ignore it
+.litmo/      litmo's own state and pull staging — git-ignore it
 ```
 
 and the commands are:
@@ -48,8 +48,8 @@ quote from.
 ## Using it
 
 ```sh
-uv add "litkit[all] @ git+https://github.com/evmo/litkit"
-uv run litkit mk > common.mk        # then commit it
+uv add "litmo[all] @ git+https://github.com/evmo/litmo"
+uv run litmo mk > common.mk        # then commit it
 ```
 
 A repository's `Makefile` is then the small part that is genuinely its own:
@@ -59,7 +59,7 @@ FORMATS   := gfm html
 REPRODUCE := env fetch build render
 
 -include common.mk
-common.mk: ; $(UV) litkit mk > $@
+common.mk: ; $(UV) litmo mk > $@
 
 build:
 	uv run python -m mypkg.pipeline all
@@ -71,9 +71,9 @@ check:
 `make help` lists every target; `make doctor` checks the toolchain, the
 config and the credentials.
 
-The extras track what a repo actually does: `litkit` alone is stdlib-only and
-enough to pull public files, `litkit[s3]` adds publishing, `litkit[archive]`
-adds the bundled kind, `litkit[all]` is both.
+The extras track what a repo actually does: `litmo` alone is stdlib-only and
+enough to pull public files, `litmo[s3]` adds publishing, `litmo[archive]`
+adds the bundled kind, `litmo[all]` is both.
 
 ## Sync
 
@@ -104,7 +104,7 @@ bit-reproducible across versions and hashing the bundle would make an unchanged
 corpus look changed on a different machine.
 
 One `manifest.json` per bucket describes everything in it. Two older manifest
-shapes are read transparently, so pointing litkit at an existing bucket does
+shapes are read transparently, so pointing litmo at an existing bucket does
 not mean re-uploading it.
 
 Everything a reader trusts comes from that one object, so it is not taken on
@@ -115,20 +115,20 @@ against the manifest before a single byte of the working tree changes, so a
 failed pull is a non-zero exit and an untouched checkout rather than a
 half-updated one.
 
-Publishing is not a transaction, and litkit does not claim to be one. Objects
+Publishing is not a transaction, and litmo does not claim to be one. Objects
 are stored under their own names — that is what makes a public bucket
-browsable — so a push that dies partway has already changed it. What litkit
+browsable — so a push that dies partway has already changed it. What litmo
 does promise is that the manifest never names an object that was not uploaded,
 that it is then written to describe what actually landed, and that it goes up
 with an `If-Match` on the copy that push read, so two maintainers publishing at
 once get a refusal rather than a silently lost entry.
 
 ```
-litkit pull [name...]      bucket -> here      (make sync)
-litkit push [name...]      here -> bucket      (make publish)
-litkit status [name...]    compare; non-zero if they differ
-litkit mk                  print common.mk
-litkit doctor              check toolchain, config, credentials
+litmo pull [name...]      bucket -> here      (make sync)
+litmo push [name...]      here -> bucket      (make publish)
+litmo status [name...]    compare; non-zero if they differ
+litmo mk                  print common.mk
+litmo doctor              check toolchain, config, credentials
 ```
 
 Credentials come from `.r2` at the repository root (git-ignored) or from the

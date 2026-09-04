@@ -2,9 +2,9 @@
 
 Three things live here so that three repositories do not each have their own:
 
-  litkit.kinds     artifact sync — archive, mirror and fetch
-  litkit/data/common.mk   the make targets every repository answers to
-  litkit.config    the sync.toml schema that ties them together
+  litmo.kinds     artifact sync — archive, mirror and fetch
+  litmo/data/common.mk   the make targets every repository answers to
+  litmo.config    the sync.toml schema that ties them together
 
 The convention those enforce is one line long: **the pipeline writes `out/`,
 and the documents only read it.** Everything else — nine make targets, data/

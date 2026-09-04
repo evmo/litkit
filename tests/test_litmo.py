@@ -1,7 +1,7 @@
 """Tests for the parts where being wrong costs real data.
 
 The manifest migration matters most: three buckets already exist, written by
-two earlier tools, and litkit has to read them without a re-upload. After that
+two earlier tools, and litmo has to read them without a re-upload. After that
 come the two properties everything else rests on — that nothing from the
 bucket lands outside the checkout, and that a pull which fails verification
 leaves the previous local copy alone.
@@ -28,11 +28,11 @@ import unittest.mock
 import urllib.error
 from pathlib import Path
 
-from litkit import cli, config, creds, kinds, paths
-from litkit import remote as transport
-from litkit.hashing import file_sha256, human, tree_hash
-from litkit.manifest import Malformed, Manifest
-from litkit.remote import Conflict, Missing, Oversized, Remote, _url
+from litmo import cli, config, creds, kinds, paths
+from litmo import remote as transport
+from litmo.hashing import file_sha256, human, tree_hash
+from litmo.manifest import Malformed, Manifest
+from litmo.remote import Conflict, Missing, Oversized, Remote, _url
 
 SYNC_TOML = """\
 [remote]
@@ -56,7 +56,7 @@ H1, H2, H3 = "1" * 64, "2" * 64, "3" * 64
 
 
 class Fake:
-    """An in-memory bucket that behaves like litkit.remote.Remote."""
+    """An in-memory bucket that behaves like litmo.remote.Remote."""
 
     def __init__(self):
         self.objects: dict[str, bytes] = {}
@@ -112,7 +112,7 @@ class Ctx:
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix="litkit-test-")).resolve()
+        self.root = Path(tempfile.mkdtemp(prefix="litmo-test-")).resolve()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         (self.root / "sync.toml").write_text(SYNC_TOML)
         self.cfg = config.load(self.root)
@@ -287,14 +287,14 @@ class TestPaths(Base):
                          "out/sub/a.csv")
 
     def test_resolve_under_rejects_a_symlinked_parent(self):
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-"))
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (self.root / "out").symlink_to(outside)
         with self.assertRaises(paths.Unsafe):
             paths.resolve_under(self.root, "out/a.csv")
 
     def test_resolve_under_refuses_to_write_through_a_symlink(self):
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-"))
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (self.root / "out").mkdir()
         (self.root / "out/a.csv").symlink_to(outside / "target.csv")
@@ -312,7 +312,7 @@ class TestPaths(Base):
 
     def test_under_artifact_follows_a_symlinked_artifact_directory(self):
         """`out -> /mnt/scratch` is a thing people do, and it is allowed."""
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-")).resolve()
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (self.root / "out").symlink_to(outside)
         art = {a.name: a for a in self.cfg.artifacts}["out"]
@@ -321,7 +321,7 @@ class TestPaths(Base):
 
     def test_under_artifact_still_bounds_a_symlinked_directory(self):
         """...but the bucket's names may not then wander out of it either."""
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-")).resolve()
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (self.root / "out").symlink_to(outside)
         (outside / "sub").symlink_to(outside.parent)
@@ -382,7 +382,7 @@ class TestCreds(Base):
         self.assertEqual(creds.load(self.root)["R2_BUCKET_NAME"], "buck")
 
     def test_an_env_supplied_key_does_not_excuse_the_file(self):
-        """The exposure is the bytes on disk, not which copy litkit used."""
+        """The exposure is the bytes on disk, not which copy litmo used."""
         self.creds_file(self.FULL, 0o644)
         os.environ["R2_SECRET_ACCESS_KEY"] = "d" * 64
         with self.assertRaises(SystemExit):
@@ -542,7 +542,7 @@ class TestManifestValidation(Base):
 
     def test_a_path_carrying_terminal_escapes_is_refused(self):
         # Display-only, but the display is how an operator learns whether the
-        # pull worked: `\x1b[2K\r` erases litkit's own line and repaints it.
+        # pull worked: `\x1b[2K\r` erases litmo's own line and repaints it.
         msg = self.bad(self.mirror(
             {"path": "out/\x1b[2K\rup to date  verified.csv",
              "size": 1, "sha256": H1}))
@@ -780,7 +780,7 @@ class TestMirror(Base):
                          ["results/x.csv"])
 
     def test_pull_into_a_symlinked_artifact_directory_stays_inside_it(self):
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-")).resolve()
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         self.write("out/a.csv", "hello")
         remote, man = Fake(), Manifest({})
@@ -801,7 +801,7 @@ class TestMirror(Base):
         self.assertFalse((outside.parent / "escape.csv").exists())
 
     def test_push_reads_through_a_symlinked_artifact_directory(self):
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-")).resolve()
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (outside / "a.csv").write_text("hello")
         (self.root / "out").symlink_to(outside)
@@ -1436,7 +1436,7 @@ class TestArchive(Base):
         self.assertEqual(tree_hash(self.root / "data/cache"), before)
 
     def test_clean_pull_keeps_a_symlinked_artifact_directory(self):
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-")).resolve()
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (self.root / "data").mkdir()
         (self.root / "data/cache").symlink_to(outside)
@@ -1479,7 +1479,7 @@ class TestArchive(Base):
         # while the manifest carried the target's bytes — push exit 0,
         # status "in sync", and every reader's pull failing on the `data`
         # extraction filter.
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-")).resolve()
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (outside / "big.bin").write_text("BIG")
         self.write("data/cache/1.json", "{}")
@@ -1497,7 +1497,7 @@ class TestArchive(Base):
     def test_a_symlinked_directory_out_of_the_artifact_is_refused_too(self):
         # Worse than a file link: rglob does not descend through it, so the
         # tree hash does not even see the contents it would publish.
-        outside = Path(tempfile.mkdtemp(prefix="litkit-outside-")).resolve()
+        outside = Path(tempfile.mkdtemp(prefix="litmo-outside-")).resolve()
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
         (outside / "x.json").write_text("{}")
         self.write("data/cache/1.json", "{}")
@@ -1674,7 +1674,7 @@ class TestArchive(Base):
         with self.assertRaises(SystemExit) as e:
             kinds.archive_pull(ctx, self.art(), force=True)
         self.assertIn("does not say how big", str(e.exception))
-        self.assertIn("litkit push cache", str(e.exception))
+        self.assertIn("litmo push cache", str(e.exception))
         # Refused *before* the request, so no unbounded body is ever drained.
         self.assertEqual(caps, [])
         self.assertEqual(tree_hash(self.root / "data/cache"), before)
@@ -1701,7 +1701,7 @@ class TestArchive(Base):
         kinds.archive_push(Ctx(self.cfg, fake, man), self.art())
         before = tree_hash(self.root / "data/cache")
 
-        bucket = Path(tempfile.mkdtemp(prefix="litkit-oversize-"))
+        bucket = Path(tempfile.mkdtemp(prefix="litmo-oversize-"))
         self.addCleanup(shutil.rmtree, bucket, ignore_errors=True)
         key = man.get("cache")["key"]
         (bucket / key).parent.mkdir(parents=True, exist_ok=True)
@@ -1822,7 +1822,7 @@ class TestState(Base):
 
     def test_a_stale_staging_tree_is_swept_away(self):
         import os as _os
-        stage = self.cfg.root / ".litkit/tmp/stage-abandoned"
+        stage = self.cfg.root / ".litmo/tmp/stage-abandoned"
         stage.mkdir(parents=True)
         (stage / "leftover").write_text("x" * 100)
         old = 1_600_000_000                       # long enough ago
@@ -1832,11 +1832,45 @@ class TestState(Base):
         self.assertFalse(stage.exists())
 
     def test_a_fresh_staging_tree_is_left_alone(self):
-        stage = self.cfg.root / ".litkit/tmp/stage-in-flight"
+        stage = self.cfg.root / ".litmo/tmp/stage-in-flight"
         stage.mkdir(parents=True)
         with kinds._staging(self.cfg):
             pass
         self.assertTrue(stage.exists())
+
+    def test_a_pre_rename_state_directory_is_moved_not_abandoned(self):
+        # Every checkout that ran the tool under its old name has `.litkit`.
+        # Abandoning it re-fetches every input in every repository and makes
+        # `status` report a tree nobody pulled.
+        legacy = self.root / ".litkit"
+        legacy.mkdir()
+        (legacy / "state.json").write_text(
+            json.dumps({"fetch": {"positions": {"etag": "keep-me"}}}))
+        self.assertEqual(
+            kinds.load_state(self.cfg)["fetch"]["positions"]["etag"], "keep-me")
+        self.assertFalse(legacy.exists())
+        self.assertTrue((self.root / ".litmo/state.json").exists())
+
+    def test_a_pre_rename_directory_never_clobbers_the_current_one(self):
+        # Both present means the tool has already run since the rename; the
+        # new one is the live state and the stale one is not allowed over it.
+        kinds.save_state(self.cfg, {"fetch": {"positions": {"etag": "live"}}})
+        legacy = self.root / ".litkit"
+        legacy.mkdir()
+        (legacy / "state.json").write_text(
+            json.dumps({"fetch": {"positions": {"etag": "stale"}}}))
+        self.assertEqual(
+            kinds.load_state(self.cfg)["fetch"]["positions"]["etag"], "live")
+        self.assertTrue(legacy.exists())
+
+    def test_a_leftover_pre_rename_directory_is_never_published(self):
+        # A checkout that has not run since the rename still has `.litkit`,
+        # and an artifact rooted above it would sweep the old state into the
+        # bucket once the name stopped being skipped.
+        art = config.Artifact(name="everything", kind="mirror", path=Path("."))
+        self.assertFalse(kinds._covers(art, ".litkit/state.json"))
+        self.assertFalse(kinds._covers(art, ".litmo/state.json"))
+        self.assertTrue(kinds._covers(art, "out/a.csv"))
 
     def test_a_corrupt_state_file_is_not_fatal(self):
         self.cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1874,7 +1908,7 @@ class Response:
 class TestRemote(Base):
     def served(self):
         """A `file://` base, so the public read path runs with no server."""
-        d = Path(tempfile.mkdtemp(prefix="litkit-served-"))
+        d = Path(tempfile.mkdtemp(prefix="litmo-served-"))
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         return d, Remote(dataclasses.replace(self.cfg, base=d.as_uri()))
 
@@ -2005,7 +2039,7 @@ class TestRemote(Base):
         trusted config does not supply one: `urlopen` follows redirects, so
         the body need not come from the configured host at all.
         """
-        d = Path(tempfile.mkdtemp(prefix="litkit-fetch-"))
+        d = Path(tempfile.mkdtemp(prefix="litmo-fetch-"))
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         (d / "big.csv").write_bytes(b"x" * 5000)
         dest = self.root / "data/positions.csv"
@@ -2018,7 +2052,7 @@ class TestRemote(Base):
         self.assertEqual(list(dest.parent.iterdir()), [])    # no .part either
 
     def test_a_fetch_inside_the_ceiling_still_arrives(self):
-        d = Path(tempfile.mkdtemp(prefix="litkit-fetch-"))
+        d = Path(tempfile.mkdtemp(prefix="litmo-fetch-"))
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         (d / "ok.csv").write_bytes(b"a,b\n1,2\n")
         dest = self.root / "data/positions.csv"
@@ -2109,7 +2143,7 @@ class TestRoundTripOverHttpLikeReads(Base):
 
     def setUp(self):
         super().setUp()
-        self.bucket = Path(tempfile.mkdtemp(prefix="litkit-bucket-"))
+        self.bucket = Path(tempfile.mkdtemp(prefix="litmo-bucket-"))
         self.addCleanup(shutil.rmtree, self.bucket, ignore_errors=True)
 
     def publish(self):

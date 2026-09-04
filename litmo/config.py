@@ -35,6 +35,7 @@ Which kind to use is a question about the files, not about taste:
 
 from __future__ import annotations
 
+import contextlib
 import tomllib
 import urllib.parse
 from dataclasses import dataclass
@@ -45,7 +46,11 @@ from . import paths
 KINDS = ("archive", "mirror", "fetch")
 
 CONFIG_NAME = "sync.toml"
-STATE_DIR = ".litkit"
+STATE_DIR = ".litmo"
+# The tool was called litkit before the rename. Every checkout that ever
+# ran it has one of these, and it holds the fetch etags and digests that
+# decide whether an input is current.
+LEGACY_STATE_DIR = ".litkit"
 
 
 @dataclass(frozen=True)
@@ -89,7 +94,27 @@ class Config:
 
     @property
     def state_file(self) -> Path:
-        return self.root / STATE_DIR / "state.json"
+        return state_dir(self.root) / "state.json"
+
+
+def state_dir(root: Path) -> Path:
+    """`<root>/.litmo`, moving a pre-rename `.litkit` into place first.
+
+    Dropping the old directory instead would not lose anything that cannot be
+    rebuilt — the next pull re-downloads and re-records — but it would
+    silently re-fetch every input in every repository that has ever run the
+    tool, and leave `status` reporting a tree nobody had pulled. Moving it is
+    one syscall and happens once.
+    """
+    new = root / STATE_DIR
+    if not new.exists():
+        legacy = root / LEGACY_STATE_DIR
+        if legacy.is_dir():
+            # Losing the race to another process is fine: whoever won moved
+            # the same directory to the same place.
+            with contextlib.suppress(OSError):
+                legacy.rename(new)
+    return new
 
 
 def find_root(start: Path | None = None) -> Path:
@@ -100,8 +125,8 @@ def find_root(start: Path | None = None) -> Path:
             return d
     raise SystemExit(
         f"no {CONFIG_NAME} in {here} or any parent.\n"
-        f"litkit runs from inside a repository that declares its artifacts; "
-        f"see `litkit mk` for the make targets that call it."
+        f"litmo runs from inside a repository that declares its artifacts; "
+        f"see `litmo mk` for the make targets that call it."
     )
 
 

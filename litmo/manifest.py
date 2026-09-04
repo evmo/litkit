@@ -12,7 +12,7 @@
 
 It is the only thing a reader has to trust, so nothing in it is taken on
 faith: every field is checked for type and shape on load, every path is
-proved to stay under the artifact that claims it (see litkit.paths), and
+proved to stay under the artifact that claims it (see litmo.paths), and
 every download is checked against the size and digest recorded here.
 
 What "written last" does and does not buy you: the manifest is committed once,
@@ -20,7 +20,7 @@ after the objects it names, and with an If-Match on the copy this run read — s
 it never names an object that was not uploaded, and two maintainers pushing at
 once cannot silently lose one another's entries. It is *not* a transaction.
 Objects are stored under their own names, which is what makes a public bucket
-browsable, so a push that dies partway has already changed the bucket. litkit
+browsable, so a push that dies partway has already changed the bucket. litmo
 closes most of that gap by writing the manifest to describe what actually
 landed, including on the failure path. What is left is the window between one
 object's PUT and that write, in which the bucket holds bytes the manifest still

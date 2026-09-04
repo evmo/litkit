@@ -33,12 +33,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import paths
-from .config import STATE_DIR
+from .config import LEGACY_STATE_DIR, STATE_DIR, state_dir
 from .hashing import file_sha256, human, tree_hash
 from .remote import Oversized, fetch_url, head
 
 ZSTD_LEVEL = 10
-SKIP_DIRS = {"__pycache__", ".ipynb_checkpoints", ".git", ".litkit"}
+# `.litkit` is here as well as `.litmo` because a checkout that has not
+# run since the rename still has one, and a leftover state directory must
+# never be walked into an artifact.
+SKIP_DIRS = {"__pycache__", ".ipynb_checkpoints", ".git",
+             STATE_DIR, LEGACY_STATE_DIR}
 
 # Belt and braces for the unpack: the bundle's digest is checked first, so
 # reaching either of these means the bucket and the manifest already disagree.
@@ -68,9 +72,9 @@ def _zstd():
         import zstandard
     except ImportError:
         raise SystemExit(
-            "the `archive` kind needs zstandard — install litkit with the "
+            "the `archive` kind needs zstandard — install litmo with the "
             "`archive` extra:\n"
-            "  uv add 'litkit[archive] @ git+https://github.com/evmo/litkit'"
+            "  uv add 'litmo[archive] @ git+https://github.com/evmo/litmo'"
         ) from None
     return zstandard
 
@@ -120,7 +124,7 @@ def _entry(ctx, art) -> dict | None:
             f"  {art.name}: sync.toml declares this {mine}, but the manifest "
             f"in the bucket describes {theirs} — there is nothing here to "
             f"compare it with.\n"
-            f"    `litkit push {art.name}` republishes it as {mine}.")
+            f"    `litmo push {art.name}` republishes it as {mine}.")
     return e
 
 
@@ -146,7 +150,7 @@ def _staging(cfg):
     tree behind — and that tree can be the size of the artifact. Anything a
     day old belongs to no live run, so it goes.
     """
-    base = cfg.root / STATE_DIR / "tmp"
+    base = state_dir(cfg.root) / "tmp"
     base.mkdir(parents=True, exist_ok=True)
     cutoff = time.time() - STALE_STAGE
     for old in base.glob("stage-*"):
@@ -460,7 +464,7 @@ def archive_pull(ctx, art, *, force=False, clean=False) -> None:
             f"  {art.name}: the manifest in the bucket does not say how big "
             f"{remote['key']} is, so there is no size to hold the download "
             f"to — {art.path} was not touched.\n"
-            f"    `litkit push {art.name}` republishes it with one.")
+            f"    `litmo push {art.name}` republishes it with one.")
 
     print(f"  {art.name:9} downloading {human(promised)}"
           f" -> {art.path} ({remote.get('files', 0):,} files,"
@@ -563,7 +567,7 @@ def archive_push(ctx, art, *, force=False, dry_run=False) -> bool:
             + (f"\n    … and {len(escaping) - 10:,} more"
                if len(escaping) > 10 else "")
             + f"\n    Replace them with the files themselves, or move the "
-              f"targets inside {art.path}, then re-run `litkit push`.")
+              f"targets inside {art.path}, then re-run `litmo push`.")
 
     digest, n, size = tree_hash(src)
     remote = _prior(ctx, art)
@@ -589,7 +593,7 @@ def archive_push(ctx, art, *, force=False, dry_run=False) -> bool:
                 f"    was {digest}\n"
                 f"    now {again}\n"
                 f"    wait for whatever is writing it to finish, then "
-                f"re-run `litkit push`")
+                f"re-run `litmo push`")
         packed = bundle.stat().st_size
         if dry_run:
             print(f"  {art.name:9} would upload {human(packed)} -> {art.key}")
@@ -949,7 +953,7 @@ def mirror_push(ctx, art, *, force=False, dry_run=False,
             "\n".join(f"    {p}" for p in raced[:10]) +
             (f"\n    … and {len(raced) - 10:,} more" if len(raced) > 10 else "") +
             f"\n    They are not published. Wait for whatever is writing "
-            f"{art.path} to finish, then re-run `litkit push`.")
+            f"{art.path} to finish, then re-run `litmo push`.")
     # Even with nothing uploaded the file list may have shrunk, so the manifest
     # is rewritten whenever it no longer matches what is on disk.
     return bool(todo) or bool(gone)

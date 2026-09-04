@@ -1,6 +1,6 @@
 """Guards on what CI and a build are allowed to resolve for themselves.
 
-Nothing here imports litkit. These are properties of the repository's own
+Nothing here imports litmo. These are properties of the repository's own
 manifests, and each one is a defect that comes back silently: the pin is a
 line of YAML or TOML that a later edit can drop without any test going red,
 and the consequence only shows up as a version nobody chose.

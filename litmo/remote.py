@@ -30,7 +30,7 @@ from pathlib import Path
 from . import creds as _creds
 from .hashing import human
 
-UA = "litkit/0.1 (+https://github.com/evmo/litkit)"
+UA = "litmo/0.1 (+https://github.com/evmo/litmo)"
 TIMEOUT = 120
 CHUNK = 1 << 20
 
@@ -284,7 +284,7 @@ class Remote:
                 raise Conflict(
                     f"  {key} changed in {self.where} while this push was "
                     f"running — someone else published.\n"
-                    f"  Nothing further was written. Re-run `litkit push`; it "
+                    f"  Nothing further was written. Re-run `litmo push`; it "
                     f"will re-read the manifest and merge."
                 ) from None
             if code in ("NotImplemented", "InvalidRequest") or status == 501:
@@ -316,7 +316,7 @@ def head(url: str) -> dict[str, str]:
 def fetch_url(url: str, dest: Path) -> dict[str, str]:
     """Download an arbitrary URL, returning its validators.
 
-    Held to `MAX_FETCH`. This was the one read path in litkit with no bound
+    Held to `MAX_FETCH`. This was the one read path in litmo with no bound
     at all — `download` takes the size the manifest promised, `get_bytes` a
     limit, the manifest itself `MAX_BYTES` — excused on the grounds that a
     `fetch` url is trusted config. It is the *host* that is chosen, though,

@@ -1,14 +1,14 @@
-"""litkit — move a repository's data and artifacts between a clone and a bucket.
+"""litmo — move a repository's data and artifacts between a clone and a bucket.
 
-    litkit pull [name...]      bucket -> here   (what `make sync` runs)
-    litkit push [name...]      here -> bucket   (what `make publish` runs)
-    litkit status [name...]    compare the two; exits non-zero if they differ
-    litkit mk                  print the shared Makefile to stdout
-    litkit doctor              check the toolchain, the config and the creds
+    litmo pull [name...]      bucket -> here   (what `make sync` runs)
+    litmo push [name...]      here -> bucket   (what `make publish` runs)
+    litmo status [name...]    compare the two; exits non-zero if they differ
+    litmo mk                  print the shared Makefile to stdout
+    litmo doctor              check the toolchain, the config and the creds
 
 What each repository publishes is declared in its own `sync.toml`; see
-litkit.config for the schema. Credentials, when a command needs them, come
-from `.r2` or the environment; see litkit.creds.
+litmo.config for the schema. Credentials, when a command needs them, come
+from `.r2` or the environment; see litmo.creds.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ class Ctx:
 
     A repository whose inputs are all `fetch` (published by something else)
     never touches a bucket, and should not need credentials or boto3 to run
-    `litkit pull`.
+    `litmo pull`.
     """
 
     def __init__(self, cfg, *, need_write: bool = False):
@@ -88,7 +88,7 @@ def cmd_pull(args) -> int:
     # it. Report it, drop those artifacts, and carry on with the rest.
     if any(a.kind != "fetch" for a in arts) and ctx.manifest.empty:
         skipped = [a for a in arts if a.kind != "fetch"]
-        print(f"  {ctx.remote.where} holds nothing yet — run `litkit push` "
+        print(f"  {ctx.remote.where} holds nothing yet — run `litmo push` "
               f"from a machine that has the data")
         print(f"  skipping {', '.join(a.name for a in skipped)}")
         arts = [a for a in arts if a.kind == "fetch"]
@@ -157,7 +157,7 @@ def cmd_status(args) -> int:
               f"{'  — ' + art.what if art.what else ''}")
     if any(a.manual for a in arts):
         print("\n  [manual] artifacts are skipped by a bare pull — name one to "
-              "move it:\n    uv run litkit pull "
+              "move it:\n    uv run litmo pull "
               f"{next(a.name for a in arts if a.manual)}")
     ctx.save()
     return rc
@@ -181,7 +181,7 @@ def cmd_doctor(args) -> int:
         mark = "ok  " if good else ("FAIL" if fatal else "note")
         print(f"  {mark}  {label:22} {detail}")
 
-    print(f"  litkit {__import__('litkit').__version__}\n")
+    print(f"  litmo {__import__('litmo').__version__}\n")
     check("python", sys.version_info >= (3, 12),
           ".".join(map(str, sys.version_info[:3])))
     q = shutil.which("quarto")
@@ -224,10 +224,10 @@ def cmd_doctor(args) -> int:
     if vendored.exists():
         same = vendored.read_text(encoding="utf-8") == mk_text()
         check("common.mk", same,
-              "matches this litkit" if same
-              else "differs from this litkit — refresh with `make mk-update`")
+              "matches this litmo" if same
+              else "differs from this litmo — refresh with `make mk-update`")
     else:
-        check("common.mk", False, "missing — `litkit mk > common.mk`")
+        check("common.mk", False, "missing — `litmo mk > common.mk`")
 
     if q:
         try:
@@ -258,7 +258,7 @@ def _positive(raw: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="litkit", description=__doc__,
+        prog="litmo", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -299,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except urllib.error.URLError as e:
         # A bucket that is not answering is a thing that happens on a train,
-        # and it should read like one rather than like a bug in litkit.
+        # and it should read like one rather than like a bug in litmo.
         raise SystemExit(f"  could not reach the bucket: "
                          f"{getattr(e, 'reason', e)}") from None
 

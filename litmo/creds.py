@@ -28,7 +28,7 @@ EXAMPLE = """\
 # environment, which takes precedence — that is the path for CI.
 #
 # The token needs Object Read & Write on this one bucket and nothing else.
-# Keep the file private — `chmod 600 .r2`. litkit refuses to load a secret
+# Keep the file private — `chmod 600 .r2`. litmo refuses to load a secret
 # that other users on the machine can read.
 R2_ACCOUNT_ID=
 R2_ACCESS_KEY_ID=
@@ -100,8 +100,8 @@ def client(creds: dict[str, str]):
         from botocore.config import Config
     except ImportError:
         raise SystemExit(
-            "this needs the S3 client — install litkit with the `s3` extra:\n"
-            "  uv add 'litkit[s3] @ git+https://github.com/evmo/litkit'"
+            "this needs the S3 client — install litmo with the `s3` extra:\n"
+            "  uv add 'litmo[s3] @ git+https://github.com/evmo/litmo'"
         ) from None
 
     return boto3.client(

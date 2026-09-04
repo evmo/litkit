@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+**Renamed from `litkit` to `litmo`.** The PyPI name `litkit` belongs to an
+unrelated package, so this one could never be published under it. The
+distribution, the import package and the command are all `litmo` now, and the
+repository is `github.com/evmo/litmo` — GitHub redirects the old URL, but a
+consumer wants its source and its vendored makefile refreshed:
+
+    uv add 'litmo[all] @ git+https://github.com/evmo/litmo'
+    make mk-update
+
+The state directory moves from `.litkit/` to `.litmo/`; the first `litmo`
+command in a checkout moves an existing one across, so no fetch state is lost.
+Update the `.gitignore` entry. Buckets are untouched — no manifest has ever
+carried the tool's name, so nothing has to be re-pushed or re-pulled.
+
 Integrity work, prompted by an audit. Nothing in `sync.toml` changes, and
 existing buckets are read exactly as before — but a few things that used to be
 tolerated are now refused, and two commands exit differently.
@@ -58,7 +72,7 @@ tolerated are now refused, and two commands exit differently.
   repository root and written, so `../../…` in a manifest — or a symlinked
   parent directory — could put a download outside the repo, or delete
   something outside it under `--clean`. Every path from the manifest and from
-  `sync.toml` is now checked (`litkit.paths`), and manifest entries are
+  `sync.toml` is now checked (`litmo.paths`), and manifest entries are
   contained to the artifact that claims them.
 - **A failed mirror pull left corrupt files installed.** Downloads went
   straight to their destinations and were verified afterwards, so a checksum

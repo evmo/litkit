@@ -6,7 +6,7 @@ true, delete it.
 
 ## Not a defect
 
-- **`litkit/data/common.mk:110` — the `clean` guard does *not* miss `~`.**
+- **`litmo/data/common.mk:110` — the `clean` guard does *not* miss `~`.**
   Reported by audit-failure-modes on 2026-09-01 as a bypass: a `CLEAN_EXTRA`
   of `~/scratch` supposedly passing the `case "$p" in /*|*..*)` pattern and
   then being tilde-expanded by the `rm -rf` recipe. It is not. Both lines
@@ -26,8 +26,8 @@ true, delete it.
   the `case` pattern against a quoted `p` in isolation is what makes this look
   real; it is not how the recipe runs. Accepted 2026-09-02.
 
-- **`npm audit` from the litkit root is out of scope.**
-  Noted by audit-deps on 2026-09-04. litkit tracks no `package.json`, npm
+- **`npm audit` from the litmo root is out of scope.**
+  Noted by audit-deps on 2026-09-04. litmo tracks no `package.json`, npm
   lockfile or JavaScript source at all. Verified here: `npm prefix` resolves
   upward to `/home/evmo` and `npm root` to `/home/evmo/node_modules`, so an
   `npm audit` run from this checkout reports on a separate parent project.
@@ -36,7 +36,7 @@ true, delete it.
 
 ## Real, and deliberately not changed
 
-- **`litkit/paths.py` — `relative` accepts Unicode bidi overrides, and that
+- **`litmo/paths.py` — `relative` accepts Unicode bidi overrides, and that
   is where the line is drawn.**
   Not from an audit: noticed while fixing the audit-security finding that
   control characters in a manifest path reach the terminal unescaped
@@ -48,9 +48,9 @@ true, delete it.
 
   Two things make it unlike the control characters, which were refused. A
   bidi override reorders only the characters of the name it sits in — it
-  cannot erase or repaint litkit's own output the way `\x1b[2K\r` can, so
+  cannot erase or repaint litmo's own output the way `\x1b[2K\r` can, so
   the forged "verified" line that motivated that fix is not available here.
-  And litkit executes nothing it pulls: the bytes land under the real name,
+  And litmo executes nothing it pulls: the bytes land under the real name,
   and every downstream tool reads that name, not its rendering.
 
   Against that, refusing them has a real cost. Legitimate Arabic and Hebrew
@@ -61,17 +61,17 @@ true, delete it.
   faith. A defect that misrenders a filename is worth less than a bug that
   makes a repository unpullable.
 
-  What would change this: litkit growing a path that *acts* on a name rather
+  What would change this: litmo growing a path that *acts* on a name rather
   than storing it — opening it by extension, handing it to a shell, choosing
   a program from it. Then the rendering and the bytes disagreeing starts to
   matter. The precise cut if that day comes is U+202A–U+202E and
   U+2066–U+2069 (the embeddings, overrides and isolates), leaving U+200E and
   U+200F alone. Accepted 2026-09-02.
 
-- **`litkit/hashing.py:24` — `tree_hash` re-reads every byte on every call,
+- **`litmo/hashing.py:24` — `tree_hash` re-reads every byte on every call,
   and there is no digest cache.**
   Reported by audit-perf on 2026-09-02 as medium, suggesting an index under
-  `.litkit/` mapping relative path to `(size, mtime_ns, digest)`, git-style.
+  `.litmo/` mapping relative path to `(size, mtime_ns, digest)`, git-style.
   The mechanism is exactly as described, counted live by wrapping
   `kinds.tree_hash`: one full tree read for `status`, for a no-op `pull` and
   for a no-op `push`; three for a real pull (pre-compare, staged
@@ -108,7 +108,7 @@ true, delete it.
   pre-push digest, the pre-pull compare — and explicitly refused at
   `kinds.py:421`, is worth writing. Accepted 2026-09-02.
 
-- **`litkit/kinds.py:285` — `_install`'s merge loop is not worth restructuring,
+- **`litmo/kinds.py:285` — `_install`'s merge loop is not worth restructuring,
   and the reason the audit gave for it is wrong.**
   audit-perf on 2026-09-02 raised this inside its "pull walks and hashes more
   times than verification needs" finding: "at 50,000 files the split was
@@ -138,7 +138,7 @@ true, delete it.
   pulled without `--clean`, which is the only path this loop runs on.
   Accepted 2026-09-02.
 
-- **`litkit/remote.py:180` — the public read path really does open a
+- **`litmo/remote.py:180` — the public read path really does open a
   connection per object, and it is staying that way for now.**
   Reported by audit-perf on 2026-09-02 as low. Reproduced: a `download_many`
   of 40 objects at 8 workers against a local HTTP/1.1 server that offers

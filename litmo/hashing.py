@@ -1,4 +1,4 @@
-"""Content identity — how litkit decides whether two copies are the same.
+"""Content identity — how litmo decides whether two copies are the same.
 
 Nothing here looks at mtimes, ownership, or the machine. Two checkouts that
 hold the same bytes under the same names agree, and a `push` after a no-op

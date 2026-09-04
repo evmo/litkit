@@ -1,6 +1,6 @@
 """Where a name is allowed to land on disk.
 
-Every path litkit writes to is a string joined to the repository root: the
+Every path litmo writes to is a string joined to the repository root: the
 manifest's, which arrived over the network, and sync.toml's, which arrived
 from a file. `../../.ssh/authorized_keys` is a perfectly ordinary-looking
 manifest entry, so neither may be joined before it has been proved to stay
@@ -39,10 +39,10 @@ def relative(raw, *, what: str = "path") -> PurePosixPath:
         raise Unsafe(f"{what}: contains a NUL byte")
     # A name from the bucket is printed back to the operator on every pull,
     # and ESC, CR and BEL are as much a part of what a terminal does with a
-    # string as the letters are: `out/\x1b[2K\rup to date …` erases litkit's
+    # string as the letters are: `out/\x1b[2K\rup to date …` erases litmo's
     # own progress line and repaints it as whatever the bucket likes. Nothing
     # legitimate publishes one — 840 real published paths carry none — and
-    # refusing here also keeps litkit from ever creating such a file on disk,
+    # refusing here also keeps litmo from ever creating such a file on disk,
     # where `ls`, make and every shell script downstream face the same thing.
     # C1 too: 0x9b is a CSI introducer on its own in some terminals.
     if bad := next((c for c in raw
